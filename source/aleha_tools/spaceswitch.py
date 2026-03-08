@@ -572,6 +572,9 @@ class AttributePopup(QWidget):
     A floating popup that lists attribute options with a dot for the selected one.
     """
 
+    ALL_KEYFRAMES = "All Keyframes"
+    CURRENT_KEYFRAMES = "Current Keyframes"
+
     def __init__(self, item_widget, options, current_idx, current_indices, marked_indices, on_select):
         super().__init__(item_widget.window())
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -623,17 +626,17 @@ class AttributePopup(QWidget):
         is_ro = self.item_widget.enum_attr == "rotateOrder"
 
         if is_ro:
-            self._add_category("All Frames", is_all=True, is_rr=True)
+            self._add_category(self.ALL_KEYFRAMES, is_all=True, is_rr=True)
         else:
-            self._add_category("Current Keys", is_all=False)
+            self._add_category(self.CURRENT_KEYFRAMES, is_all=False)
             self._add_separator()
-            self._add_category("All Keys", is_all=True)
+            self._add_category(self.ALL_KEYFRAMES, is_all=True)
 
     def _build_numeric_ui(self):
         """Builds sections for continuous numeric sliders."""
-        self._add_slider_section("Current Keys", is_all=False)
+        self._add_slider_section(self.CURRENT_KEYFRAMES, is_all=False)
         self._add_separator()
-        self._add_slider_section("All Keys", is_all=True)
+        self._add_slider_section(self.ALL_KEYFRAMES, is_all=True)
 
     def _add_category(self, title_text, is_all, is_rr=False):
         """Creates a section with a title and a list of option buttons."""
@@ -659,7 +662,7 @@ class AttributePopup(QWidget):
         title = QLabel(text)
         title.setContentsMargins(0, 0, 0, util.DPI(4))
         title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        title.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-weight: bold; font-size: {util.DPI(10)}px;")
+        title.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: {util.DPI(11)}px;")
         return title
 
     def _add_separator(self):
@@ -1317,9 +1320,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         selection_layout.setContentsMargins(0, util.DPI(6), 0, util.DPI(8))
 
         selection_title = QLabel("Selection")
-        selection_title.setStyleSheet(
-            "font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR)
-        )
+        selection_title.setStyleSheet("font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR))
         selection_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         selection_title.setWordWrap(False)
         selection_title.setFixedHeight(selection_title.fontMetrics().height() + 2)

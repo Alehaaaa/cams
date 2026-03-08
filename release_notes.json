@@ -1,5 +1,9 @@
 {
     "versions": {
+        "0.2.81": [
+            "Refactor keyframe labels.",
+            "Adjusted title font style."
+        ],
         "0.2.8": [
             "SpaceSwitch: Added support for sitching normal Attributes.",
             "And many other fixes..."
