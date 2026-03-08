@@ -36,13 +36,11 @@ try:
     from PySide2.QtCore import *  # noqa: F403
     from PySide2.QtGui import *  # noqa: F403
     from PySide2.QtWidgets import *  # noqa: F403
-    from shiboken2 import wrapInstance, isValid
 except ImportError:
     PYSIDE_VERSION = 6
     from PySide6.QtCore import *  # noqa: F403
     from PySide6.QtGui import *  # noqa: F403
     from PySide6.QtWidgets import *  # noqa: F403
-    from shiboken6 import wrapInstance, isValid
 
 import aleha_tools
 from aleha_tools import base_widgets, util, widgets
@@ -81,13 +79,6 @@ COLOR_BLEND_MULTI = "#584655"
 # =================================================================================
 #  1. INFRASTRUCTURE & MAPPING
 # =================================================================================
-
-
-def get_maya_window():
-    main_window_ptr = omui.MQtUtil.mainWindow()
-    if not main_window_ptr:
-        return None
-    return wrapInstance(int(main_window_ptr), QMainWindow)
 
 
 class CallbackManager:
@@ -336,13 +327,13 @@ class FloatingWidget(base_widgets.QFlatDialog):
     def _is_cursor_within_bounds(self):
         """Geometric intersection check for the main widget and its active sub-popups."""
         cursor_pos = QCursor.pos()
-        if not isValid(self):
+        if not util.is_valid_widget(self):
             return False
 
         if self.frameGeometry().contains(cursor_pos):
             return True
 
-        if hasattr(self, "_active_popup") and self._active_popup and isValid(self._active_popup) and self._active_popup.isVisible():
+        if hasattr(self, "_active_popup") and self._active_popup and util.is_valid_widget(self._active_popup) and self._active_popup.isVisible():
             if self._active_popup.frameGeometry().contains(cursor_pos):
                 return True
         return False
@@ -1220,7 +1211,7 @@ class Timeline(QWidget):
         tline = mel.eval("$tmpVar=$gPlayBackSlider")
         ptr = omui.MQtUtil.findControl(tline) or omui.MQtUtil.findLayout(tline) or omui.MQtUtil.findMenuItem(tline)
         if ptr:
-            return wrapInstance(int(ptr), QWidget)
+            return util.get_maya_qt(ptr, QWidget)
 
     def paintEvent(self, event):
         """Handles painting the timeline marker on the playback slider."""
@@ -1267,7 +1258,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     The main widget for the Space Switch tool, now with configurable modes.
     """
 
-    def __init__(self, popup=False, parent=get_maya_window()):
+    def __init__(self, popup=False, parent=None):
+        parent = parent or util.get_maya_qt()
         super().__init__(popup=popup, parent=parent)
 
         self._active_popup = None
@@ -1532,9 +1524,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         """Unified interaction management for multi-window focus tracking."""
         if not is_active:
             cursor_pos = QCursor.pos()
-            if isValid(self) and self.frameGeometry().contains(cursor_pos):
+            if util.is_valid_widget(self) and self.frameGeometry().contains(cursor_pos):
                 is_active = True
-            if not is_active and self._active_popup and isValid(self._active_popup) and self._active_popup.isVisible():
+            if not is_active and self._active_popup and util.is_valid_widget(self._active_popup) and self._active_popup.isVisible():
                 if self._active_popup.frameGeometry().contains(cursor_pos):
                     is_active = True
 
@@ -1550,7 +1542,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             self._resume_auto_close()
 
         for (enum_attr, _), (attr_item, _) in self._active_switch_widgets.items():
-            if not isValid(attr_item):
+            if not util.is_valid_widget(attr_item):
                 continue
             if hasattr(attr_item, "pill_opacity"):
                 attr_item.pill_opacity.setOpacity(1.0 if self._is_ui_hovered else 0.0)
@@ -1586,17 +1578,22 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     def _show_pending_popup(self):
         """Displays the attribute choice popup beside the hovered row."""
         # If no pending item or it was deleted, hide current
-        if not self._popup_pending_item or not isValid(self._popup_pending_item):
-            if self._active_popup and isValid(self._active_popup) and not self._active_popup.underMouse():
+        if not self._popup_pending_item or not util.is_valid_widget(self._popup_pending_item):
+            if self._active_popup and util.is_valid_widget(self._active_popup) and not self._active_popup.underMouse():
                 self._active_popup.hide()
-            elif self._active_popup and isValid(self._active_popup) and self._active_popup.underMouse():
+            elif self._active_popup and util.is_valid_widget(self._active_popup) and self._active_popup.underMouse():
                 pass
             return
 
         item = self._popup_pending_item
 
         # If current is same item and visible, do nothing
-        if self._active_popup and isValid(self._active_popup) and self._active_popup.item_widget == item and self._active_popup.isVisible():
+        if (
+            self._active_popup
+            and util.is_valid_widget(self._active_popup)
+            and self._active_popup.item_widget == item
+            and self._active_popup.isVisible()
+        ):
             return
 
         # Otherwise, switch
@@ -1609,7 +1606,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def _close_active_popup(self):
         """Safely removes the current popup."""
-        if hasattr(self, "_active_popup") and self._active_popup and isValid(self._active_popup):
+        if hasattr(self, "_active_popup") and self._active_popup and util.is_valid_widget(self._active_popup):
             self._active_popup.hide()
             self._active_popup.deleteLater()
             self._active_popup = None
@@ -1948,14 +1945,14 @@ class SpaceSwitchManager:
     @classmethod
     def _launch(cls, popup):
         dlg = _MAIN_DICT.get("_SPACESWITCH_INSTANCE")
-        if dlg is not None and isValid(dlg):
+        if dlg is not None and util.is_valid_widget(dlg):
             try:
                 dlg._cb.clear()
                 dlg.close()
             finally:
                 dlg = None
 
-        if not (dlg is not None and isValid(dlg)):
+        if not (dlg is not None and util.is_valid_widget(dlg)):
             dlg = SpaceSwitchAlehaWidget(popup=popup)
             _MAIN_DICT["_SPACESWITCH_INSTANCE"] = dlg
 
