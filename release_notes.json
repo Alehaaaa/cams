@@ -1,5 +1,8 @@
 {
     "versions": {
+        "0.2.82-hotfix": [
+            "SpaceSwitch: Only show connected attrs."
+        ],
         "0.2.81": [
             "Refactor keyframe labels.",
             "Adjusted title font style."

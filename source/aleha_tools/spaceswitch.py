@@ -1419,6 +1419,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         for node in self._previous_selection:
             # Only user-defined attrs (excludes Maya defaults), but allow rotateOrder if requested
             ordered_attrs = cmds.listAttr(node, ud=True) or []
+            # only the ones with an output connection
+            ordered_attrs = [attr for attr in ordered_attrs if cmds.connectionInfo("%s.%s" % (node, attr), isSource=True)]
             if self.show_rotate_order and cmds.attributeQuery("rotateOrder", node=node, exists=True):
                 if "rotateOrder" not in ordered_attrs:
                     ordered_attrs.append("rotateOrder")

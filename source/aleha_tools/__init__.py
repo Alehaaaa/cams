@@ -12,7 +12,7 @@ TO-DO:
 
 DATA = {
     "TOOL": "Cams",
-    "VERSION": "0.2.81",
+    "VERSION": "0.2.82-hotfix",
     "AUTHOR": {
         "name": "Alehaaa",
         "website": "https://alehaaaa.github.io",
