@@ -124,6 +124,7 @@ from .funcs import (
 from .base_widgets import (
     QFlatDialog,
     QFlatConfirmDialog,
+    TooltipManager,
 )
 from . import DATA
 
@@ -271,7 +272,7 @@ QLineEdit that doesn't trigger next action
 """
 
 
-class CustomLineEdit(QLineEdit):
+class QFlatRenameEdit(QLineEdit):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
             self.returnPressed.emit()
@@ -284,9 +285,24 @@ QPushButton hover detection
 """
 
 
-class HoverButton(QPushButton):
+class QFlatCamButton(QPushButton):
     dropped = Signal(tuple)
     singleClicked = Signal()
+    doubleClicked = Signal()
+
+    SHORTCUT_CONFIG = [
+        {"icon": "select", "label": "Select", "keys": [Qt.Key_Shift], "action": "select_cam"},
+        {"icon": "deselect", "label": "Deselect", "keys": [Qt.Key_Control], "action": "deselect_cam"},
+        {"icon": "duplicate", "label": "Duplicate", "keys": [Qt.Key_Control, Qt.Key_Shift], "action": "duplicate_cam"},
+        {"icon": "rename", "label": "Rename", "keys": [Qt.Key_Control, Qt.Key_Alt], "action": "rename"},
+        {"icon": "remove", "label": "Remove", "keys": [Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt], "action": "remove_cam"},
+        {"icon": "tear_off", "label": "Tear off", "keys": [Qt.Key_Shift, Qt.Key_Alt], "action": "tear_off"},
+        {"icon": "attributes", "label": "Attributes", "keys": [Qt.Key_Alt], "action": "attributes"},
+    ]
+
+    # Cache for pre-calculated key sets
+    _SHORTCUT_SETS = {tuple(sorted(c["keys"])): c for c in SHORTCUT_CONFIG}
+    _ICON_CACHE = {}
 
     @property
     def camera(self):
@@ -310,16 +326,19 @@ class HoverButton(QPushButton):
 
         self.setCursor(CONTEXTUAL_CURSOR)
         self.setFixedHeight(DPI(25))
-        self.setToolTip(self._camera)
 
         self._update_button_name()
 
+        if self._camera:
+            self._camera_short_name = self._camera.split("|")[-1].split(":")[-1]
+
         # Initialization sequence
-        self._initialize_camera_type()
+        # Common UI Initialization
+        self._initialize_camera_type()  # Must be first for icons
+        self._setup_icons()
         self._setup_styles()
-        self._setup_icons()
-        self._setup_icons()
-        self._setup_inline_rename()  # New setup
+        self._setup_inline_rename()
+        self._setup_tooltip()
         self._setup_event_handlers()
 
     def _emit_single_click(self):
@@ -359,17 +378,16 @@ class HoverButton(QPushButton):
         # Draw Text
         if not self._renaming_active:
             text_x = icon_x + icon_size + DPI(4)
-            padding_right = DPI(16) if current_variant in ("light", "dark") else DPI(4)
+            padding_right = DPI(4)
             text_rect = self.rect().adjusted(text_x, 0, -padding_right, 0)
             painter.setPen(Qt.black)
 
-            elided_text = painter.fontMetrics().elidedText(self.text(), Qt.ElideRight, text_rect.width())
-            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, elided_text)
+            painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.text())
 
         # Draw Menu dots hint on hover
         if current_variant in ("light", "dark") and not self._renaming_active:
-            dots_size = DPI(12)
-            dots_x = self.width() - dots_size - DPI(2)
+            dots_size = DPI(6)
+            dots_x = self.width() - dots_size - DPI(1)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(0, 0, 0, 150) if current_variant == "light" else Qt.black)
             for i in range(3):
@@ -407,21 +425,24 @@ class HoverButton(QPushButton):
         self.setStatusTip("Look thru %s" % self._camera)
 
     def _setup_icons(self):
-        icon_map = {
-            "default": "%s" % self.cam_type,
-            "select": "select",
-            "deselect": "deselect",
-            "duplicate": "duplicate",
-            "rename": "rename",
-            "remove": "remove",
-            "tearoff": "tear_off",
-            "attributes": "attributes",
-        }
-        self.icons = {k: QIcon(return_icon_path(v)) for k, v in icon_map.items()}
+        icon_names = ["select", "deselect", "duplicate", "rename", "remove", "tear_off", "attributes"]
+
+        # Ensure default icon is cached
+        default_icon_path = return_icon_path(self.cam_type)
+        if default_icon_path not in self._ICON_CACHE:
+            self._ICON_CACHE[default_icon_path] = QIcon(default_icon_path)
+        self.icons = {"default": self._ICON_CACHE[default_icon_path]}
+
+        for name in icon_names:
+            path = return_icon_path(name)
+            if path not in self._ICON_CACHE:
+                self._ICON_CACHE[path] = QIcon(path)
+            self.icons[name] = self._ICON_CACHE[path]
+
         self.setIcon(self.icons["default"])
 
     def _setup_inline_rename(self):
-        self.inline_rename_field = CustomLineEdit(self)
+        self.inline_rename_field = QFlatRenameEdit(self)
         self.inline_rename_field.hide()
         self.inline_rename_field.returnPressed.connect(self._finish_inline_rename)
         self.inline_rename_field.editingFinished.connect(self._finish_inline_rename)
@@ -456,6 +477,24 @@ class HoverButton(QPushButton):
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(250)
         self._click_timer.timeout.connect(self._emit_single_click)
+
+    def _setup_tooltip(self):
+        self._tooltip_timer = QTimer(self)
+        self._tooltip_timer.setSingleShot(True)
+        self._tooltip_timer.setInterval(800)
+        self._tooltip_timer.timeout.connect(self._show_tooltip)
+
+    def _show_tooltip(self):
+        if self.underMouse() and not self._renaming_active:
+            icon_path = return_icon_path(self.cam_type)
+            cam_name = "Maya Camera" if self.cam_type == "camera" else f"{self.cam_type.capitalize()} Camera"
+            desc = f"Manage this {cam_name}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports."
+            TooltipManager.show(self._camera, self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc)
+
+    def _hide_tooltip(self):
+        self._tooltip_timer.stop()
+        # We no longer force-hide here as the QFlatTooltip manages its own
+        # distance-based closure now.
 
     # Context Menu Management #################################################
     def _show_context_menu(self, pos):
@@ -605,8 +644,8 @@ class HoverButton(QPushButton):
             set_cam_display(panels, attribute, is_plugin, state)
         save_display_to_cam(self._camera, [(attribute, is_plugin, state)])
 
-    # Event Handling ##########################################################
     def mousePressEvent(self, event):
+        TooltipManager.hide()  # Force hide on interaction
         if event.button() == Qt.LeftButton:
             self._click_timer.stop()
             self._start_pos = event.pos()
@@ -619,40 +658,37 @@ class HoverButton(QPushButton):
         is_dots_click = False
         current_variant = getattr(self, "_current_bg_variant", "base")
         if current_variant in ("light", "dark"):
-            dots_size = DPI(12)
-            dots_x = self.width() - dots_size - DPI(4)
+            dots_size = DPI(6)
+            dots_x = self.width() - dots_size - DPI(1)
             if event.pos().x() >= dots_x:
                 is_dots_click = True
 
         if event.button() == Qt.LeftButton:
             self._start_pos = None
-            if self.underMouse():
-                self._set_background_color("light")
-            else:
-                self._set_background_color("base")
-
             if self.rect().contains(event.pos()) and not self._renaming_active:
                 if is_dots_click:
                     self._show_context_menu(event.pos())
                 else:
                     self._click_timer.start()
-        elif event.button() == Qt.RightButton:
-            if self.underMouse():
-                self._set_background_color("light")
-            else:
-                self._set_background_color("base")
+
+        if self.underMouse():
+            self._set_background_color("light")
+        else:
+            self._set_background_color("base")
+            self.setIcon(self.icons["default"])
 
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
-            dots_size = DPI(12)
-            dots_x = self.width() - dots_size - DPI(4)
+            dots_size = DPI(6)
+            dots_x = self.width() - dots_size - DPI(1)
             if event.pos().x() >= dots_x:
                 return  # Ignored on context menu dots
 
             self._click_timer.stop()
             self.start_inline_rename()
+            self.doubleClicked.emit()  # Emit doubleClicked signal
 
     def mouseMoveEvent(self, event):
         if not self._should_start_drag(event):
@@ -665,15 +701,14 @@ class HoverButton(QPushButton):
         drag.setPixmap(self.grab())
         drag.setHotSpot(event.pos() - self.rect().topLeft())
 
+        TooltipManager.hide()  # Force hide on drag
         self.setDown(False)
-        if self.underMouse():
-            self._set_background_color("light")
-        else:
-            self._set_background_color("base")
+        self._set_background_color("base")  # Reset to base before drag starts
+        self.setIcon(self.icons["default"])  # Reset icon
 
         drag.exec_(Qt.MoveAction)
 
-        self.setDown(False)
+        # After drag, reset state based on mouse position
         if self.underMouse():
             self._set_background_color("light")
         else:
@@ -684,10 +719,12 @@ class HoverButton(QPushButton):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Enter:
+            self._tooltip_timer.start()
             self._handle_key_modifiers()
             self._set_background_color("light")
 
         elif event.type() == QEvent.Leave:
+            self._hide_tooltip()
             self.setIcon(self.icons["default"])
             self._set_background_color("base")
 
@@ -702,8 +739,9 @@ class HoverButton(QPushButton):
         if self._width:
             font_metrics = QFontMetrics(self.font())
             text_width = font_metrics.horizontalAdvance(self.text())
-            # Padding: Icon (16) + Left(4) + Mid(4) + Dots(12) + Right(6) = 42.
-            padding = DPI(42)
+            # Padding: Icon (16) + Left(4) + Mid(4) + Right(4) = 28.
+            # Dots are skinny overlay-only.
+            padding = DPI(28)
             self.setFixedWidth(text_width + padding)
 
     def _set_background_color(self, variant):
@@ -712,41 +750,41 @@ class HoverButton(QPushButton):
 
     # Modifier Key Handling ###################################################
     def _handle_key_modifiers(self):
-        if self.underMouse():
-            mods = self._parentUI.keys_pressed
-            ctrl, shift, alt = (
-                mods[Qt.Key_Control],
-                mods[Qt.Key_Shift],
-                mods[Qt.Key_Alt],
-            )
+        if not self.underMouse():
+            return
 
-            action_map = {
-                (0, 1, 0): ("select", partial(select_cam, self._camera)),
-                (1, 0, 0): ("deselect", partial(deselect_cam, self._camera)),
-                (1, 1, 0): ("duplicate", partial(duplicate_cam, self._camera, self)),
-                (1, 0, 1): (
-                    "rename",
-                    self.start_inline_rename,
-                ),
-                (1, 1, 1): ("remove", partial(delete_cam, self._camera, self._parentUI)),
-                (0, 1, 1): ("tearoff", partial(tear_off_cam, self._camera)),
-                (0, 0, 1): (
-                    "attributes",
-                    partial(Attributes.showUI, self._camera, self.window()),
-                ),
-            }
+        mods_pressed = self._parentUI.keys_pressed
+        active_keys = tuple(sorted([k for k in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt) if mods_pressed.get(k)]))
 
-            icon_name, action = next(
-                (v for k, v in action_map.items() if k == (ctrl, shift, alt)),
-                ("default", partial(look_thru, cam=self._camera, ui=self._parentUI)),
-            )
+        icon_name = "default"
+        action = partial(look_thru, cam=self._camera, ui=self._parentUI)
 
-            self.setIcon(self.icons[icon_name])
-            try:
-                self.singleClicked.disconnect()
-            except Exception:
-                pass
-            self.singleClicked.connect(action)
+        if active_keys in self._SHORTCUT_SETS:
+            cfg = self._SHORTCUT_SETS[active_keys]
+            icon_name = cfg["icon"]
+            act_type = cfg["action"]
+
+            if act_type == "select_cam":
+                action = partial(select_cam, self._camera)
+            elif act_type == "deselect_cam":
+                action = partial(deselect_cam, self._camera)
+            elif act_type == "duplicate_cam":
+                action = partial(duplicate_cam, self._camera, self)
+            elif act_type == "rename":
+                action = self.start_inline_rename
+            elif act_type == "remove_cam":
+                action = partial(delete_cam, self._camera, self._parentUI)
+            elif act_type == "tear_off":
+                action = partial(tear_off_cam, self._camera)
+            elif act_type == "attributes":
+                action = partial(Attributes.showUI, self._camera, self.window())
+
+        self.setIcon(self.icons[icon_name])
+        try:
+            self.singleClicked.disconnect()
+        except Exception:
+            pass
+        self.singleClicked.connect(action)
 
     def start_inline_rename(self):
         if not self._is_modifiable:
@@ -925,7 +963,7 @@ class HoverButton(QPushButton):
         )
 
     def _add_tearoff_action(self, menu):
-        menu.addAction(self.icons["tearoff"], "Tear Off Copy", partial(tear_off_cam, self._camera))
+        menu.addAction(self.icons["tear_off"], "Tear Off Copy", partial(tear_off_cam, self._camera))
 
     def _add_delete_action(self, menu):
         if self._camera != self._parentUI.default_cam[0] and not cmds.referenceQuery(self._camera, isNodeReferenced=True):
@@ -1226,7 +1264,9 @@ class Attributes(QFlatDialog):
 
                 target.setEnabled(settable)
 
-        self.focal_length_slider.valueChanged.connect(lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value()))))
+        self.focal_length_slider.valueChanged.connect(
+            lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value())))
+        )
 
         self.overscan_slider.valueChanged.connect(lambda: self.overscan_value.setText(str(self.get_float(self.overscan_slider.value()))))
 

@@ -1,1 +1,30 @@
-python("import importlib\nspec = importlib.util.spec_from_file_location(\"install_cams\", r\"\\\\HKEY\\temp\\from_alejandro\\cams_tool\\install_cams.py\")\ninstall_cams_module = importlib.util.module_from_spec(spec)\nspec.loader.exec_module(install_cams_module)\n\ninstall_cams_module.onMayaDroppedPythonFile()")
+// Drag and drop this file into the Maya viewport to install Cams.
+// This script finds the companion install_cams.py and executes it.
+
+global proc install_cams_mel_dropped() {
+    string $whatIs = `whatIs install_cams_mel_dropped`;
+    string $fullPath = `substring $whatIs 25 999`;
+    string $buffer[];
+    int $num = `tokenize $fullPath "/" $buffer`;
+    
+    // Reconstruct directory path
+    string $dir = $buffer[0];
+    // If path is absolute on windows, it might start with C:
+    if (`substring $fullPath 1 1` == "/") {
+        $dir = "/" + $buffer[0];
+    }
+    
+    for ($i = 1; $i < ($num - 1); $i++) {
+        $dir += "/" + $buffer[$i];
+    }
+    
+    string $pythonFile = $dir + "/install_cams.py";
+    
+    if (`file -q -ex $pythonFile`) {
+        python("import sys; import os; sys.path.append(r'" + $dir + "') if r'" + $dir + "' not in sys.path else None; import install_cams; import importlib; importlib.reload(install_cams); install_cams.install()");
+    } else {
+        error("Could not find install_cams.py in: " + $dir);
+    }
+}
+
+install_cams_mel_dropped();

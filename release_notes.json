@@ -1,5 +1,14 @@
 {
     "versions": {
+        "0.2.84": [
+            "Refactored prefs system.",
+            "Cleaned prefs updates."
+        ],
+        "0.2.83": [
+            "Added rich custom tooltips.",
+            "Support for shortcut displays.",
+            "And more..."
+        ],
         "0.2.82-hotfix": [
             "SpaceSwitch: Only show connected attrs."
         ],

@@ -85,7 +85,7 @@ for mod_name in modules_to_delete:
 
 # Import and reload necessary modules
 import aleha_tools  # type: ignore  # noqa: E402
-from . import settings, widgets, funcs, util, updater, base_widgets  # noqa: E402
+from . import settings, widgets, funcs, util, updater  # noqa: E402
 
 reload(aleha_tools)
 reload(settings)
@@ -352,7 +352,7 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         self.cams_scroll.container_layout.addWidget(cams_scroll_widget)
 
     def create_widgets(self):
-        self.default_cam_btn = widgets.HoverButton(self.default_cam[0], self, width=False)
+        self.default_cam_btn = widgets.QFlatCamButton(self.default_cam[0], self, width=False)
         self.default_cam_layout.addWidget(self.default_cam_btn)
         self.default_cam_btn.dropped.connect(partial(funcs.drag_insert_camera, self.default_cam[0], self))
 
@@ -409,7 +409,7 @@ class UI(MayaQWidgetDockableMixin, QDialog):
                 for i in range(self.cams_scroll.container_layout.count())
                 if isinstance(
                     self.cams_scroll.container_layout.itemAt(i).widget(),
-                    widgets.HoverButton,
+                    widgets.QFlatCamButton,
                 )
             }
 
@@ -446,7 +446,7 @@ class UI(MayaQWidgetDockableMixin, QDialog):
                         button = existing_buttons[cam]
                         self.cams_scroll.container_layout.insertWidget(0, button)
                     else:
-                        button = widgets.HoverButton(cam, self)
+                        button = widgets.QFlatCamButton(cam, self)
                         self.cams_scroll.container_layout.insertWidget(0, button)
                         button.dropped.connect(partial(funcs.drag_insert_camera, cam, self))
 
@@ -578,7 +578,9 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         self.startup_run_Cams_checkbox.setStatusTip("Run Cams on Startup")
         self.startup_run_Cams_checkbox.setCheckable(True)
         self.startup_run_Cams_checkbox.setChecked(self.startup_run_cams)
-        self.startup_run_Cams_checkbox.triggered.connect(lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state))
+        self.startup_run_Cams_checkbox.triggered.connect(
+            lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state)
+        )
 
         self.startup_Viewport_checkbox = system_menu.addAction("Viewport on Startup")
         self.startup_Viewport_checkbox.setToolTip("Apply Show settings to Viewports on Startup")
@@ -592,7 +594,9 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         self.startup_HUD_checkbox = system_menu.addAction("HUD on Startup")
         self.startup_HUD_checkbox.setCheckable(True)
         self.startup_HUD_checkbox.setChecked(self.startup_hud)
-        self.startup_HUD_checkbox.triggered.connect(lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state))
+        self.startup_HUD_checkbox.triggered.connect(
+            lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state)
+        )
 
         system_menu.addSeparator()
 
@@ -941,118 +945,103 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         startup_viewport=None,
         startup_run_cams=None,
         skip_update=None,
+        confirm_exit=None,
         save=True,
         reset=False,
     ):
-        _initial_settings = settings.initial_settings()
+        """
+        Preferences processor.
+        Handles defaults, user overrides, runtime updates, and UI synchronization.
+        """
+        initial = settings.initial_settings()
 
-        self.cams_prefs = self.user_prefs.get("defaultCameraSettings", None) or _initial_settings.get("defaultCameraSettings", None)
-        self.startup_prefs = self.user_prefs.get("startupSettings", {}) or _initial_settings.get("startupSettings", {})
+        # Reset Logic
+        if reset:
+            from .base_widgets import QFlatConfirmDialog
 
-        # Set the value of the attribute to a dictionary of multiple variable values
-        if cam:
-            if cam != self.cams_prefs["camera"]:
-                self.clearLayout(self.default_cam_layout)
-                self.default_cam_btn = widgets.HoverButton(cam[0], self, width=False)
-                self.default_cam_layout.addWidget(self.default_cam_btn)
-                self.default_cam_btn.dropped.connect(partial(funcs.drag_insert_camera, cam[0], self))
+            res = QFlatConfirmDialog.question(
+                self,
+                "Reset Settings",
+                "Erase all Cams settings and return to factory defaults?\nThis cannot be undone.",
+                buttons=[
+                    QFlatConfirmDialog.CustomButton("Reset All", positive=True, icon=util.return_icon_path("remove")),
+                    QFlatConfirmDialog.Cancel,
+                ],
+                highlight=QFlatConfirmDialog.Cancel,
+                icon=util.return_icon_path("warning.svg"),
+            )
+            if not (res and res.get("positive")):
+                return
+            self.user_prefs = initial.copy()
 
-                self.all_displayed_buttons["main"] = self.default_cam_btn
-                if cam[0] in (cmds.ls(sl=1) or []):
-                    self.set_selection_style(self.default_cam_btn, True)
+        # Baseline Preparation
+        self.cams_prefs = self.user_prefs.get("defaultCameraSettings", initial["defaultCameraSettings"]).copy()
+        self.startup_prefs = self.user_prefs.get("startupSettings", initial["startupSettings"]).copy()
 
-            self.cams_prefs["camera"] = cam
-        if near:
-            self.cams_prefs["near_clip"] = near
-        if far:
-            self.cams_prefs["far_clip"] = far
-        if overscan:
-            self.cams_prefs["overscan"] = overscan
-        if mask_op:
-            self.cams_prefs["mask_opacity"] = mask_op
-        if mask_color:
-            self.cams_prefs["mask_color"] = mask_color
+        # Main Camera UI Synchronization
+        if cam and cam != self.cams_prefs.get("camera"):
+            self.clearLayout(self.default_cam_layout)
+            self.default_cam_btn = widgets.QFlatCamButton(cam[0], self, width=False)
+            self.default_cam_layout.addWidget(self.default_cam_btn)
+            self.default_cam_btn.dropped.connect(partial(funcs.drag_insert_camera, cam[0], self))
 
-        if position:
-            self.startup_prefs["position"] = position
-        if startup_hud is not None:
-            self.startup_prefs["startup_hud"] = startup_hud
-        if startup_viewport is not None:
-            self.startup_prefs["startup_viewport"] = startup_viewport
-        if startup_run_cams is not None:
-            self.startup_prefs["startup_run_cams"] = startup_run_cams
-        if skip_update is not None:
-            self.startup_prefs["skip_update"] = skip_update
+            self.all_displayed_buttons["main"] = self.default_cam_btn
+            if cam[0] in (cmds.ls(sl=1) or []):
+                self.set_selection_style(self.default_cam_btn, True)
 
-        self.default_cam = self.cams_prefs.get("camera", None) or _initial_settings["defaultCameraSettings"]["camera"]
+        # Apply Parameter Updates
+        cam_updates = {
+            "camera": cam,
+            "near_clip": near,
+            "far_clip": far,
+            "overscan": overscan,
+            "mask_opacity": mask_op,
+            "mask_color": mask_color,
+        }
+        startup_updates = {
+            "position": position,
+            "startup_hud": startup_hud,
+            "startup_viewport": startup_viewport,
+            "startup_run_cams": startup_run_cams,
+            "skip_update": skip_update,
+            "confirm_exit": confirm_exit,
+        }
 
-        self.default_overscan = self.cams_prefs.get("overscan", None) or _initial_settings["defaultCameraSettings"]["overscan"]
+        for key, val in cam_updates.items():
+            if val is not None:
+                self.cams_prefs[key] = val
+        for key, val in startup_updates.items():
+            if val is not None:
+                self.startup_prefs[key] = val
 
-        self.default_near_clip_plane = self.cams_prefs.get("near_clip", None) or _initial_settings["defaultCameraSettings"]["near_clip"]
+        # Sync Instance Attributes. Pattern: (Instance Attr, Source Dict, Key, Category)
+        sync_map = [
+            ("default_cam", self.cams_prefs, "camera", "defaultCameraSettings"),
+            ("default_overscan", self.cams_prefs, "overscan", "defaultCameraSettings"),
+            ("default_near_clip_plane", self.cams_prefs, "near_clip", "defaultCameraSettings"),
+            ("default_far_clip_plane", self.cams_prefs, "far_clip", "defaultCameraSettings"),
+            ("default_resolution", self.cams_prefs, "display_resolution", "defaultCameraSettings"),
+            ("default_gate_mask_opacity", self.cams_prefs, "mask_opacity", "defaultCameraSettings"),
+            ("default_gate_mask_color", self.cams_prefs, "mask_color", "defaultCameraSettings"),
+            ("position", self.startup_prefs, "position", "startupSettings"),
+            ("startup_hud", self.startup_prefs, "startup_hud", "startupSettings"),
+            ("startup_run_cams", self.startup_prefs, "startup_run_cams", "startupSettings"),
+            ("startup_viewport", self.startup_prefs, "startup_viewport", "startupSettings"),
+            ("skip_update", self.startup_prefs, "skip_update", "startupSettings"),
+            ("confirm_exit", self.startup_prefs, "confirm_exit", "startupSettings"),
+        ]
 
-        self.default_far_clip_plane = self.cams_prefs.get("far_clip", None) or _initial_settings["defaultCameraSettings"]["far_clip"]
+        for attr, pref_dict, key, cat in sync_map:
+            val = pref_dict.get(key)
+            if val is None:
+                val = initial[cat][key]
+            setattr(self, attr, val)
 
-        self.default_resolution = self.cams_prefs.get("display_resolution", None) or _initial_settings["defaultCameraSettings"]["display_resolution"]
-
-        self.default_gate_mask_opacity = self.cams_prefs.get("mask_opacity", None) or _initial_settings["defaultCameraSettings"]["mask_opacity"]
-
-        self.default_gate_mask_color = self.cams_prefs.get("mask_color", None) or _initial_settings["defaultCameraSettings"]["mask_color"]
-
-        self.position = (
-            self.startup_prefs.get("position")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("position") is not None
-            else _initial_settings["startupSettings"]["position"]
-        )
-
-        self.startup_hud = (
-            self.startup_prefs.get("startup_hud")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("startup_hud") is not None
-            else _initial_settings["startupSettings"]["startup_hud"]
-        )
-
-        self.startup_run_cams = (
-            self.startup_prefs.get("startup_run_cams")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("startup_run_cams") is not None
-            else _initial_settings["startupSettings"]["startup_run_cams"]
-        )
-
-        self.startup_viewport = (
-            self.startup_prefs.get("startup_viewport")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("startup_viewport") is not None
-            else _initial_settings["startupSettings"]["startup_viewport"]
-        )
-
-        self.skip_update = (
-            self.startup_prefs.get("skip_update")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("skip_update") is not None
-            else _initial_settings["startupSettings"]["skip_update"]
-        )
-
-        self.confirm_exit = (
-            self.startup_prefs.get("confirm_exit")
-            if isinstance(self.startup_prefs, dict) and self.startup_prefs.get("confirm_exit") is not None
-            else _initial_settings["startupSettings"]["confirm_exit"]
-        )
-
+        # Persistence
         if save:
-            if not reset:
-                settings.save_to_disk("defaultCameraSettings", self.cams_prefs)
-                settings.save_to_disk("startupSettings", self.startup_prefs)
-            else:
-                res = base_widgets.QFlatConfirmDialog.question(
-                    self,
-                    "Reset Settings",
-                    "About to erase all Settings for Cams!\nThis action is NOT undoable.",
-                    buttons=[
-                        base_widgets.QFlatConfirmDialog.CustomButton("Reset", positive=True, icon=util.return_icon_path("remove")),
-                        base_widgets.QFlatConfirmDialog.Cancel,
-                    ],
-                    highlight=base_widgets.QFlatConfirmDialog.Cancel,
-                    icon=util.return_icon_path("warning.svg"),
-                )
-                if res and res.get("positive"):
-                    settings.save_to_disk("defaultCameraSettings", self.cams_prefs)
-                    settings.save_to_disk("startupSettings", self.startup_prefs)
+            self.user_prefs.update({"defaultCameraSettings": self.cams_prefs, "startupSettings": self.startup_prefs})
+            settings.save_to_disk("defaultCameraSettings", self.cams_prefs)
+            settings.save_to_disk("startupSettings", self.startup_prefs)
 
     def settings(self):
         self.process_prefs(save=False)
