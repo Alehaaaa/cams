@@ -1,5 +1,10 @@
 {
     "versions": {
+        "0.2.86-hotfix": [
+            "Tooltip keys can be plain text.",
+            "Added \"Double Click\" rename in tooltip shortcuts.",
+            "Disable rename for read-only."
+        ],
         "0.2.85": [
             "Refactored tooltip manager.",
             "Templated tooltip content.",

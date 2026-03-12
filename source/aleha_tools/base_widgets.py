@@ -635,7 +635,13 @@ class TooltipManager:
             cls._timer.stop()
         cls.hide()
         cls._current_tooltip = QFlatTooltip(
-            text=text, anchor_widget=anchor_widget, icon=icon, shortcuts=shortcuts, description=description, template=template, icon_obj=icon_obj
+            text=text,
+            anchor_widget=anchor_widget,
+            icon=icon,
+            shortcuts=shortcuts,
+            description=description,
+            template=template,
+            icon_obj=icon_obj,
         )
         cls._current_tooltip.show_around(anchor_widget, action_rect, target_rect=target_rect)
 
@@ -780,7 +786,9 @@ class QFlatTooltip(QWidget):
         self.main_layout.setSpacing(0)
 
         self.main_layout.setSizeConstraint(QVBoxLayout.SetMinAndMaxSize)
-        self.setStyleSheet(f"QFlatTooltip > QFrame#BgFrame {{ background-color: {self.BG_COLOR}; border-radius: {DPI(self.BORDER_RADIUS)}px; }}")
+        self.setStyleSheet(
+            f"QFlatTooltip > QFrame#BgFrame {{ background-color: {self.BG_COLOR}; border-radius: {DPI(self.BORDER_RADIUS)}px; }}"
+        )
 
         self.bg_frame = QFrame()
         self.bg_frame.setObjectName("BgFrame")
@@ -913,7 +921,10 @@ class QFlatTooltip(QWidget):
             row.addWidget(name)
             row.addStretch()
 
-            keys = QLabel(self._format_keys(sh.get("keys", [])))
+            command = sh.get("keys", "")
+            if isinstance(command, list):
+                command = self._format_keys(command)
+            keys = QLabel(command)
             keys.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
             row.addWidget(keys)
             self.bg_layout.addLayout(row)
@@ -987,7 +998,9 @@ class QFlatTooltip(QWidget):
             painter.drawPolygon(poly)
         else:
             # Arrow on BOTTOM edge, pointing DOWN
-            poly = QPolygonF([QPointF(ax, self.height()), QPointF(ax - aw / 2, self.height() - ah - 1), QPointF(ax + aw / 2, self.height() - ah - 1)])
+            poly = QPolygonF(
+                [QPointF(ax, self.height()), QPointF(ax - aw / 2, self.height() - ah - 1), QPointF(ax + aw / 2, self.height() - ah - 1)]
+            )
             painter.drawPolygon(poly)
 
     def show_around(self, widget, action_rect=None, target_rect=None):

@@ -285,11 +285,10 @@ class OpenMenu(QMenu):
         if desc:
             title = action.text().replace("&", "")
             template = f"<title>{title}</title><text>{desc}</text>"
-            
 
             geometry = self.actionGeometry(action)
             target_rect = QRect(self.mapToGlobal(geometry.topLeft()), geometry.size())
-            
+
             icon = action.icon() if not action.icon().isNull() else None
             TooltipManager.delayed_show(
                 text=title, anchor_widget=self, target_rect=target_rect, description=desc, template=template, icon_obj=icon
@@ -350,10 +349,11 @@ class QFlatCamButton(QPushButton):
     doubleClicked = Signal()
 
     SHORTCUT_CONFIG = [
+        {"icon": "rename", "label": "Rename", "keys": "Double Click", "action": "rename"},
+        {"icon": "rename", "label": "Rename", "keys": [Qt.Key_Control, Qt.Key_Alt], "action": "rename"},
         {"icon": "select", "label": "Select", "keys": [Qt.Key_Shift], "action": "select_cam"},
         {"icon": "deselect", "label": "Deselect", "keys": [Qt.Key_Control], "action": "deselect_cam"},
         {"icon": "duplicate", "label": "Duplicate", "keys": [Qt.Key_Control, Qt.Key_Shift], "action": "duplicate_cam"},
-        {"icon": "rename", "label": "Rename", "keys": [Qt.Key_Control, Qt.Key_Alt], "action": "rename"},
         {"icon": "remove", "label": "Remove", "keys": [Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt], "action": "remove_cam"},
         {"icon": "tear_off", "label": "Tear off", "keys": [Qt.Key_Shift, Qt.Key_Alt], "action": "tear_off"},
         {"icon": "attributes", "label": "Attributes", "keys": [Qt.Key_Alt], "action": "attributes"},
@@ -377,6 +377,9 @@ class QFlatCamButton(QPushButton):
         # Internal variables
         self._is_modifiable = check_if_valid_camera(self._camera)
         self._start_pos = None
+
+        if not self._is_modifiable:
+            self.SHORTCUT_CONFIG = [sh for sh in self.SHORTCUT_CONFIG if sh.get("action") != "rename"]
 
         # Settings
         self.setMouseTracking(True)
@@ -1314,7 +1317,9 @@ class Attributes(QFlatDialog):
 
                 target.setEnabled(settable)
 
-        self.focal_length_slider.valueChanged.connect(lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value()))))
+        self.focal_length_slider.valueChanged.connect(
+            lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value())))
+        )
 
         self.overscan_slider.valueChanged.connect(lambda: self.overscan_value.setText(str(self.get_float(self.overscan_slider.value()))))
 
