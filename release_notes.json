@@ -1,5 +1,10 @@
 {
     "versions": {
+        "0.2.85": [
+            "Refactored tooltip manager.",
+            "Templated tooltip content.",
+            "And more..."
+        ],
         "0.2.84": [
             "Refactored prefs system.",
             "Cleaned prefs updates."

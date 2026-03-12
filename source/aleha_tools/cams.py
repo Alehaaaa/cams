@@ -469,20 +469,20 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         title_action = widgets.MenuTitleAction(self.VERSION, self)
         menu_general.addAction(title_action)
 
-        self.reload_btn = menu_general.addAction(QIcon(util.return_icon_path("refresh")), "Refresh Cameras")
+        self.reload_btn = menu_general.addAction(QIcon(util.return_icon_path("refresh")), "Refresh Cameras", description="Forcefully refresh the camera list, useful if outside changes aren't reflecting.")
 
         menu_general.addSeparator()
 
-        self.settings_btn = menu_general.addAction(QIcon(util.return_icon_path("default_attributes")), "Default Attributes")
+        self.settings_btn = menu_general.addAction(QIcon(util.return_icon_path("default_attributes")), "Default Attributes", description="Configure the default attributes applied when you create a new camera.")
         # menu_general.addSeparator()
 
-        self._create_dock_menu(menu_general)
+        menu_general.addMenu(self._create_dock_menu(), description="Docking options to snap Cams UI perfectly to various Maya windows.")
 
         menu_general.addSeparator()
 
-        self.updates = menu_general.addAction(QIcon(util.return_icon_path("check_updates")), "Check for Updates")
-        self._create_settings_menu(menu_general)
-        self.about = menu_general.addAction(QIcon(util.return_icon_path("info")), "About")
+        self.updates = menu_general.addAction(QIcon(util.return_icon_path("check_updates")), "Check for Updates", description="Check online to see if a newer version of Cams is available.")
+        menu_general.addMenu(self._create_settings_menu(), description="Advanced system preferences, startup behaviors, and uninstallation.")
+        self.about = menu_general.addAction(QIcon(util.return_icon_path("info")), "About", description="General information about Cams and the author.")
 
         ## TOOLS MENU ##
 
@@ -490,22 +490,22 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         menu_tools.setTearOffEnabled(True)
         menu_bar.addMenu(menu_tools)
 
-        self.followCam = menu_tools.addAction(QIcon(util.return_icon_path("follow")), "Follow Cam")
-        self.aimCam = menu_tools.addAction(QIcon(util.return_icon_path("aim")), "Aim Cam")
+        self.followCam = menu_tools.addAction(QIcon(util.return_icon_path("follow")), "Follow Cam", description="Create a camera that smoothly follows the selected object's movements automatically.")
+        self.aimCam = menu_tools.addAction(QIcon(util.return_icon_path("aim")), "Aim Cam", description="Create a camera with a dedicated aim target for precise and stable framing.")
         menu_tools.addSeparator()
-        self.multicams = menu_tools.addAction(QIcon(util.return_icon_path("camera_multicams")), "MultiCams")
-        self.spaceswitch = menu_tools.addAction(QIcon(util.return_icon_path("spaceswitch.svg")), "SpaceSwitch")
+        self.multicams = menu_tools.addAction(QIcon(util.return_icon_path("camera_multicams")), "MultiCams", description="Generate a rig with multiple cameras that you can seamlessly switch between over time.")
+        self.spaceswitch = menu_tools.addAction(QIcon(util.return_icon_path("spaceswitch.svg")), "SpaceSwitch", description="Launch the SpaceSwitch tool for seamlessly managing parent spaces and constraints without popping.")
 
         menu_tools.addSeparator()
 
         self.menu_presets = widgets.OpenMenu("HUD Presets", menu_tools)
-        menu_tools.addMenu(self.menu_presets)
+        menu_tools.addMenu(self.menu_presets, description="Manage, customize, and apply Heads Up Display (HUD) overlays on your viewport.")
         self.menu_presets.setTearOffEnabled(True)
 
         self.add_presets()
         self.menu_presets.aboutToShow.connect(self.add_presets)
 
-        self.HUD_checkbox = menu_tools.addAction("Display HUDs")
+        self.HUD_checkbox = menu_tools.addAction("Display HUDs", description="Toggle visibility of the custom Cams HUD overlay in the active viewport.")
         self.HUD_checkbox.setCheckable(True)
         self.HUD_checkbox.setChecked(self.HUD_display_cam())
         self.HUD_checkbox.triggered.connect(lambda state=self.HUD_display_cam(): self.HUD_display_cam(state=state))
@@ -519,7 +519,7 @@ class UI(MayaQWidgetDockableMixin, QDialog):
         menu_bar.setCornerWidget(self.dock_ui_btn)
         self.main_layout.setMenuBar(menu_bar)
 
-    def _create_dock_menu(self, parent_menu):
+    def _create_dock_menu(self):
         self.dock_menu = QMenu("Dock Window")
         self.dock_menu.setIcon(QIcon(util.return_icon_path("dock")))
         self.dock_menu.setTearOffEnabled(True)
@@ -565,24 +565,21 @@ class UI(MayaQWidgetDockableMixin, QDialog):
 
         self.dock_menu.aboutToShow.connect(self.update_dock_menu)
 
-        parent_menu.addMenu(self.dock_menu)
+        return self.dock_menu
 
-    def _create_settings_menu(self, parent_menu):
-        system_menu = widgets.OpenMenu("System", parent_menu)
-        parent_menu.addMenu(system_menu)
+    def _create_settings_menu(self):
+        system_menu = widgets.OpenMenu("System")
         system_menu.setIcon(QIcon(util.return_icon_path("system")))
         system_menu.setTearOffEnabled(True)
 
-        self.startup_run_Cams_checkbox = system_menu.addAction("Run Cams on Startup")
+        self.startup_run_Cams_checkbox = system_menu.addAction("Run Cams on Startup", description="Automatically launch the Cams UI whenever Maya opens.")
         self.startup_run_Cams_checkbox.setToolTip("Run Cams on Startup")
         self.startup_run_Cams_checkbox.setStatusTip("Run Cams on Startup")
         self.startup_run_Cams_checkbox.setCheckable(True)
         self.startup_run_Cams_checkbox.setChecked(self.startup_run_cams)
-        self.startup_run_Cams_checkbox.triggered.connect(
-            lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state)
-        )
+        self.startup_run_Cams_checkbox.triggered.connect(lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state))
 
-        self.startup_Viewport_checkbox = system_menu.addAction("Viewport on Startup")
+        self.startup_Viewport_checkbox = system_menu.addAction("Viewport on Startup", description="Apply saved display settings (like grids, curves) to viewports when opening a scene.")
         self.startup_Viewport_checkbox.setToolTip("Apply Show settings to Viewports on Startup")
         self.startup_Viewport_checkbox.setStatusTip("Apply Show settings to Viewports on Startup")
         self.startup_Viewport_checkbox.setCheckable(True)
@@ -591,19 +588,19 @@ class UI(MayaQWidgetDockableMixin, QDialog):
             lambda state=self.startup_Viewport_checkbox.isChecked(): self.process_prefs(startup_viewport=state)
         )
 
-        self.startup_HUD_checkbox = system_menu.addAction("HUD on Startup")
+        self.startup_HUD_checkbox = system_menu.addAction("HUD on Startup", description="Automatically display the default HUD preset over the viewport when opening a scene.")
         self.startup_HUD_checkbox.setCheckable(True)
         self.startup_HUD_checkbox.setChecked(self.startup_hud)
-        self.startup_HUD_checkbox.triggered.connect(
-            lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state)
-        )
+        self.startup_HUD_checkbox.triggered.connect(lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state))
 
         system_menu.addSeparator()
 
-        self.reset_cams_data = system_menu.addAction(QIcon(util.return_icon_path("warning.svg")), "Reset Settings")
+        self.reset_cams_data = system_menu.addAction(QIcon(util.return_icon_path("warning.svg")), "Reset Settings", description="Completely revert all Cams settings and preferences to defaults.")
         system_menu.addSeparator()
-        self.close_btn = system_menu.addAction(QIcon(util.return_icon_path("close_menu")), "Close")
-        self.uninstall_btn = system_menu.addAction(QIcon(util.return_icon_path("remove")), "Uninstall")
+        self.close_btn = system_menu.addAction(QIcon(util.return_icon_path("close_menu")), "Close", description="Close the Cams UI.")
+        self.uninstall_btn = system_menu.addAction(QIcon(util.return_icon_path("remove")), "Uninstall", description="Completely uninstall Cams from Maya, deleting scripts and removing shelf buttons.")
+
+        return system_menu
 
     def change_startup_run_cams(self, state):
         QTimer.singleShot(0, partial(funcs.install_userSetup, uninstall=not state))

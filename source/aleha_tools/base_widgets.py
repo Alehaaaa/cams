@@ -9,6 +9,8 @@ try:
         QFrame,
         QSizePolicy,
         QLayout,
+        QMenu,
+        QApplication,
     )
     from PySide6.QtGui import (  # type: ignore
         QIcon,
@@ -18,6 +20,8 @@ try:
         QPolygonF,
         QCursor,
         QGuiApplication,
+        QMovie,
+        QFontMetrics,
     )
     from PySide6.QtCore import (  # type: ignore
         Qt,
@@ -39,6 +43,8 @@ except ImportError:
         QFrame,
         QSizePolicy,
         QLayout,
+        QMenu,
+        QApplication,
     )
     from PySide2.QtGui import (
         QIcon,
@@ -48,6 +54,8 @@ except ImportError:
         QPolygonF,
         QCursor,
         QGuiApplication,
+        QMovie,
+        QFontMetrics,
     )
     from PySide2.QtCore import (
         Qt,
@@ -61,6 +69,7 @@ except ImportError:
 
 from functools import partial
 import sys
+import xml.etree.ElementTree as ET
 from .util import (
     DPI,
     return_icon_path,
@@ -586,9 +595,22 @@ class TooltipManager:
     """Manages global state for QFlatTooltips ensuring only one exists at a time."""
 
     _current_tooltip = None
+    _timer = None
+
+    @classmethod
+    def is_active(cls):
+        """Returns True if a tooltip is visible or a show timer is running."""
+        return (cls._current_tooltip and cls._current_tooltip.isVisible()) or (cls._timer and cls._timer.isActive())
+
+    @classmethod
+    def cancel_timer(cls):
+        """Stops any pending show request without closing the current tooltip."""
+        if cls._timer:
+            cls._timer.stop()
 
     @classmethod
     def hide(cls):
+        cls.cancel_timer()
         if cls._current_tooltip:
             try:
                 cls._current_tooltip.close()
@@ -597,47 +619,88 @@ class TooltipManager:
             cls._current_tooltip = None
 
     @classmethod
-    def show(cls, text, anchor_widget, icon=None, shortcuts=None, description=None):
+    def show(
+        cls,
+        text="",
+        anchor_widget=None,
+        icon=None,
+        shortcuts=None,
+        description=None,
+        template=None,
+        action_rect=None,
+        icon_obj=None,
+        target_rect=None,
+    ):
+        if cls._timer:
+            cls._timer.stop()
         cls.hide()
-        cls._current_tooltip = QFlatTooltip(text, anchor_widget, icon, shortcuts, description)
-        cls._current_tooltip.show_around(anchor_widget)
+        cls._current_tooltip = QFlatTooltip(
+            text=text, anchor_widget=anchor_widget, icon=icon, shortcuts=shortcuts, description=description, template=template, icon_obj=icon_obj
+        )
+        cls._current_tooltip.show_around(anchor_widget, action_rect, target_rect=target_rect)
+
+    @classmethod
+    def delayed_show(cls, delay=800, **kwargs):
+        """Unified delayed showing for both buttons and menu actions."""
+        if cls._timer and cls._timer.isActive():
+            cls._timer.stop()
+
+        if not cls._timer:
+            cls._timer = QTimer()
+            cls._timer.setSingleShot(True)
+
+        try:
+            cls._timer.timeout.disconnect()
+        except Exception:
+            pass
+
+        cls._timer.timeout.connect(lambda: cls.show(**kwargs))
+        cls._timer.setInterval(delay)
+        cls._timer.start()
 
 
 class QFlatTooltip(QWidget):
     """A floating tooltip with an arrow pointing to its source."""
 
-    BG_COLOR = "#383838"
-    HEADER_COLOR = "#2a2a2a"
+    BG_COLOR = "#333333"
+    HEADER_COLOR = "#282828"
     TEXT_COLOR = "#bbbbbb"
     ACCENT_COLOR = "#e0e0e0"
+
     ARROW_W = 12
     ARROW_H = 8
+    BORDER_RADIUS = 8
 
-    AUTO_CLOSE_DIST = 40
+    MAX_WIDTH = 320
+    MIN_WIDTH = 220
 
     IS_MAC = sys.platform == "darwin"
-
     KEY_MAP = {
-        Qt.Key_Alt: "⌥" if sys.platform == "darwin" else "Alt",
-        Qt.Key_Shift: "⇧" if sys.platform == "darwin" else "Shift",
-        Qt.Key_Control: "⌘" if sys.platform == "darwin" else "Ctrl",
+        Qt.Key_Alt: "⌥" if IS_MAC else "Alt",
+        Qt.Key_Shift: "⇧" if IS_MAC else "Shift",
+        Qt.Key_Control: "⌘" if IS_MAC else "Ctrl",
     }
-    KEY_ORDER = [Qt.Key_Alt, Qt.Key_Shift, Qt.Key_Control]
+    KEY_ORDER = [Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift]
 
-    def __init__(self, text, anchor_widget, icon=None, shortcuts=None, description=None):
+    def __init__(self, text="", anchor_widget=None, icon=None, shortcuts=None, description=None, template=None, icon_obj=None):
         super().__init__(get_maya_qt())
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
 
-        self.text = text
         self.anchor_widget = anchor_widget
-        self.icon_path = icon
         self.shortcuts = shortcuts or []
-        self.description = description
+        self.icon_obj = icon_obj
 
-        # Cached DPI values for high-frequency timer
-        self._buffer = DPI(self.AUTO_CLOSE_DIST)
+        if template is None:
+            template = ""
+            if icon:
+                template += f"<icon>{icon}</icon>"
+            if text:
+                template += f"<title>{text}</title>"
+            if description:
+                template += f"<text>{description}</text>"
+        self.template = template
 
         self._auto_close_timer = QTimer(self)
         self._auto_close_timer.setInterval(200)
@@ -646,45 +709,56 @@ class QFlatTooltip(QWidget):
         self._setup_ui()
 
     def _check_auto_close(self):
+        """Strictly manages tooltip visibility based on cursor location."""
         if not self.isVisible():
             self._auto_close_timer.stop()
             return
 
         cursor_pos = QCursor.pos()
         tt_geo = self.frameGeometry()
+        side = getattr(self, "side", "top")
 
-        if tt_geo.contains(cursor_pos):
+        buffer = DPI(30)
+        # Expansion: Left, Top, Right, Bottom
+        if side == "top":
+            tt_safety = tt_geo.adjusted(-buffer, 0, buffer, buffer)
+        else:
+            tt_safety = tt_geo.adjusted(-buffer, -buffer, buffer, 0)
+
+        if tt_safety.contains(cursor_pos):
             return
 
-        if self.anchor_widget and self.anchor_widget.isVisible():
-            anc_pos = self.anchor_widget.mapToGlobal(QPoint(0, 0))
+        # Determine anchor geometry
+        if getattr(self, "target_rect", None):
+            anc_geo = self.target_rect
+        elif getattr(self, "action_rect", None) and self.anchor_widget and self.anchor_widget.isVisible():
+            anc_pos = self.anchor_widget.mapToGlobal(self.action_rect.topLeft())
+            anc_geo = QRect(anc_pos, self.action_rect.size())
+        elif self.anchor_widget and self.anchor_widget.isVisible():
             anc_geo = self.anchor_widget.rect()
-            anc_geo.moveTo(anc_pos)
-            if anc_geo.contains(cursor_pos):
-                return
+            anc_geo.moveTo(self.anchor_widget.mapToGlobal(QPoint(0, 0)))
         else:
             self.close()
             return
 
-        # Narrow Bridge (for moving between button and tooltip)
-        side = getattr(self, "side", "top")
+        if anc_geo.contains(cursor_pos):
+            return
 
-        # Define the bridge area (narrow vertical lane)
+        if isinstance(self.anchor_widget, QMenu):
+            active_popup = QApplication.activePopupWidget()
+            if active_popup and active_popup.geometry().contains(cursor_pos):
+                return
+
         bridge_l = max(anc_geo.left(), tt_geo.left())
         bridge_r = min(anc_geo.right(), tt_geo.right())
 
-        if side == "top":  # BELOW button
-            bridge_top, bridge_bot = anc_geo.bottom(), tt_geo.top()
-            # Safety buffer strictly around tooltip (back and sides)
-            tt_safety = tt_geo.adjusted(-self._buffer, 0, self._buffer, self._buffer)
-        else:  # ABOVE button
-            bridge_top, bridge_bot = tt_geo.bottom(), anc_geo.top()
-            # Safety buffer strictly around tooltip (front and sides)
-            tt_safety = tt_geo.adjusted(-self._buffer, -self._buffer, self._buffer, 0)
+        if side == "top":
+            bridge_top, bridge_bot = anc_geo.bottom() - 1, tt_geo.top() + 1
+        else:
+            bridge_top, bridge_bot = tt_geo.bottom() - 1, anc_geo.top() + 1
 
         bridge = QRect(bridge_l, bridge_top, bridge_r - bridge_l, bridge_bot - bridge_top)
-
-        if bridge.contains(cursor_pos) or tt_safety.contains(cursor_pos):
+        if bridge.contains(cursor_pos):
             return
 
         self.close()
@@ -698,107 +772,199 @@ class QFlatTooltip(QWidget):
                 if k not in self.KEY_MAP:
                     parts.append(str(k))
 
-        return "".join(parts) + "+Click"
+        return ("" if self.IS_MAC else "+").join(parts) + "+Click"
 
     def _setup_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        # Header Section
-        self.header = QFrame()
-        self.header.setStyleSheet(
-            f"background-color: {self.HEADER_COLOR}; border-top-left-radius: {DPI(6)}px; border-top-right-radius: {DPI(6)}px;"
-        )
-        header_layout = QHBoxLayout(self.header)
-        header_layout.setContentsMargins(DPI(12), DPI(8), DPI(12), DPI(8))
-        header_layout.setSpacing(DPI(8))
+        self.main_layout.setSizeConstraint(QVBoxLayout.SetMinAndMaxSize)
+        self.setStyleSheet(f"QFlatTooltip > QFrame#BgFrame {{ background-color: {self.BG_COLOR}; border-radius: {DPI(self.BORDER_RADIUS)}px; }}")
 
-        if self.icon_path:
-            icon_label = QLabel()
-            pix = QPixmap(self.icon_path)
-            if not pix.isNull():
-                dim = DPI(16)
-                icon_label.setPixmap(pix.scaled(dim, dim, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                header_layout.addWidget(icon_label)
+        self.bg_frame = QFrame()
+        self.bg_frame.setObjectName("BgFrame")
+        self.bg_frame.setMinimumWidth(DPI(self.MIN_WIDTH))
+        self.bg_frame.setMaximumWidth(DPI(self.MAX_WIDTH))
+        self.bg_layout = QVBoxLayout(self.bg_frame)
+        self.bg_layout.setContentsMargins(0, 0, 0, 0)
+        self.bg_layout.setSpacing(0)
+        self.main_layout.addWidget(self.bg_frame)
 
-        self.title_label = QLabel(self.text)
-        self.title_label.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(11)}px; font-weight: bold;")
-        header_layout.addWidget(self.title_label)
-        header_layout.addStretch()
-
-        self.main_layout.addWidget(self.header)
-
-        # Description Section
-        if self.description:
-            self.desc_label = QLabel(self.description)
-            self.desc_label.setWordWrap(True)
-            self.desc_label.setStyleSheet(
-                f"color: {self.TEXT_COLOR}; font-size: {DPI(11)}px; padding: {DPI(8)}px {DPI(12)}px {DPI(4)}px {DPI(12)}px; background-color: {self.BG_COLOR};"
-            )
-            self.main_layout.addWidget(self.desc_label)
-
-        # Content Section (Shortcuts)
-        if self.shortcuts:
-            self.content = QFrame()
-            self.content.setStyleSheet(
-                f"background-color: {self.BG_COLOR}; border-bottom-left-radius: {DPI(6)}px; border-bottom-right-radius: {DPI(6)}px;"
-            )
-            content_layout = QVBoxLayout(self.content)
-            content_layout.setContentsMargins(0, 0, 0, DPI(12))  # 0 horizontal for side-to-side header
-            content_layout.setSpacing(DPI(4))
-
-            # "Shortcuts" mini header with darker side-to-side background
-            self.sh_header_frame = QFrame()
-            self.sh_header_frame.setStyleSheet(f"background-color: {self.HEADER_COLOR}; border: none;")
-            sh_header_layout = QHBoxLayout(self.sh_header_frame)
-            sh_header_layout.setContentsMargins(0, DPI(8), 0, DPI(12))
-            sh_header_layout.setSpacing(0)
-
-            sh_header = QLabel("Shortcuts")
-            sh_header.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(11)}px; font-weight: bold;")
-            sh_header.setMinimumHeight(DPI(10))
-            sh_header.setAlignment(Qt.AlignCenter)
-            sh_header_layout.addWidget(sh_header)
-
-            content_layout.addSpacing(DPI(10))  # Margin before header
-            content_layout.addWidget(self.sh_header_frame)
-            content_layout.addSpacing(DPI(10))  # More margin after header
-
-            for sh in self.shortcuts:
-                row = QHBoxLayout()
-                row.setContentsMargins(DPI(12), 0, DPI(12), 0)  # Internal margins for rows
-                row.setSpacing(DPI(8))
-
-                # Icon
-                icon_lab = QLabel()
-                sh_pix = QPixmap(return_icon_path(sh.get("icon", "default")))
-                if not sh_pix.isNull():
-                    s_dim = DPI(14)
-                    icon_lab.setPixmap(sh_pix.scaled(s_dim, s_dim, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                row.addWidget(icon_lab)
-
-                # Label
-                name_lab = QLabel(sh.get("label", ""))
-                name_lab.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
-                row.addWidget(name_lab)
-
-                row.addStretch()
-
-                # Keys
-                key_string = self._format_keys(sh.get("keys", []))
-                keys_lab = QLabel(key_string)
-                keys_lab.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px; font-weight: bold;")
-                row.addWidget(keys_lab)
-
-                content_layout.addLayout(row)
-
-            self.main_layout.addWidget(self.content)
-        else:
-            # Adjust header for single-section look
-            self.header.setStyleSheet(f"background-color: {self.BG_COLOR}; border-radius: {DPI(6)}px;")
-
+        self._build_content()
         self.adjustSize()
+
+    def _build_content(self):
+        try:
+            safe_template = self.template.replace("&", "&amp;")
+            root = ET.fromstring(f"<root>{safe_template}</root>")
+        except Exception as e:
+            root = ET.fromstring(f"<root><text>Invalid tooltip XML: {e}</text></root>")
+
+        # Header Handling
+        header_frame, header_layout = self._create_section_frame("", top_corners=True)
+        has_header = self._populate_header(root, header_layout)
+        self.has_header = has_header
+
+        if has_header:
+            header_layout.addStretch()
+            self.bg_layout.addWidget(header_frame)
+        else:
+            header_frame.hide()
+            header_frame.setParent(None)
+
+        # Main Content
+        content_layout = QVBoxLayout()
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(DPI(4))
+
+        self._populate_content(root, content_layout)
+
+        if content_layout.count() > 0:
+            self.bg_layout.addLayout(content_layout)
+            # Safe distance at bottom or between content and shortcuts
+            self.bg_layout.addSpacing(DPI(16))
+
+        # Shortcuts Section
+        if self.shortcuts:
+            self._build_shortcuts_section()
+
+    def _create_section_frame(self, color, top_corners=False):
+        frame = QFrame()
+        radius = DPI(self.BORDER_RADIUS) if top_corners else 0
+        frame.setStyleSheet(
+            f"background-color: {color}; border-top-left-radius: {radius}px; border-top-right-radius: {radius}px; border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;"
+        )
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(DPI(12), DPI(12), DPI(12), DPI(12))
+        layout.setSpacing(DPI(8))
+        return frame, layout
+
+    def _populate_header(self, root, layout):
+        has_items = False
+
+        # Add explicit icon if provided
+        if self.icon_obj and not self.icon_obj.isNull():
+            lbl = self._create_icon_label(self.icon_obj, dim=29)
+            layout.addWidget(lbl)
+            has_items = True
+
+        for child in root:
+            if child.tag == "icon" and not has_items:
+                pix = QPixmap(child.text)
+                if not pix.isNull():
+                    layout.addWidget(self._create_icon_label(pix, dim=29))
+                    has_items = True
+            elif child.tag == "title":
+                layout.addWidget(self._create_text_label(child.text or "", size=18, bold=True, elide=True))
+                has_items = True
+
+            # Stop header processing at first non-header tag
+            if child.tag not in ["title", "icon"]:
+                break
+        return has_items
+
+    def _populate_content(self, root, layout):
+        in_content = False
+        for child in root:
+            if not in_content and child.tag not in ["title", "icon"]:
+                in_content = True
+            if not in_content:
+                continue
+
+            if child.tag == "text":
+                lbl = QLabel(child.text or "")
+                lbl.setWordWrap(True)
+                lbl.setMaximumWidth(DPI(320))
+                # Extra bottom margin (DPI 6) to account for font descenders (g, p, q)
+                lbl.setContentsMargins(DPI(12), DPI(4), DPI(12), DPI(6))
+                lbl.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(11.1)}px; background-color: transparent;")
+                layout.addWidget(lbl)
+            elif child.tag == "separator":
+                sep = QFrame()
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(f"background-color: {self.HEADER_COLOR}; margin: {DPI(4)}px {DPI(12)}px;")
+                layout.addWidget(sep)
+            elif child.tag in ["image", "gif"]:
+                layout.addWidget(self._create_media_label(child.text or "", is_gif=(child.tag == "gif")))
+
+    def _build_shortcuts_section(self):
+        frame, layout = self._create_section_frame(self.HEADER_COLOR)
+        layout.setContentsMargins(0, DPI(4), 0, DPI(4))
+
+        title_lbl = self._create_text_label("Shortcuts", size=16, bold=True, elide=True, align=Qt.AlignCenter)
+        title_lbl.setMinimumHeight(DPI(20))
+        layout.addWidget(title_lbl)
+
+        self.bg_layout.addSpacing(DPI(10))
+        self.bg_layout.addWidget(frame)
+        self.bg_layout.addSpacing(DPI(12))
+
+        for sh in self.shortcuts:
+            row = QHBoxLayout()
+            row.setContentsMargins(DPI(12), 0, DPI(12), 0)
+            row.setSpacing(DPI(20))
+
+            pix = QPixmap(return_icon_path(sh.get("icon", "default")))
+            row.addWidget(self._create_icon_label(pix, dim=17))
+
+            name = QLabel(sh.get("label", ""))
+            name.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
+            row.addWidget(name)
+            row.addStretch()
+
+            keys = QLabel(self._format_keys(sh.get("keys", [])))
+            keys.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
+            row.addWidget(keys)
+            self.bg_layout.addLayout(row)
+            self.bg_layout.addSpacing(DPI(4))
+
+        self.bg_layout.addSpacing(DPI(16))
+
+    def _create_icon_label(self, source, dim=16):
+        lbl = QLabel()
+        px_dim = DPI(dim)
+        pix = source.pixmap(px_dim, px_dim) if hasattr(source, "pixmap") else source
+        lbl.setPixmap(pix.scaled(px_dim, px_dim, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return lbl
+
+    def _create_text_label(self, text, size=11, bold=False, elide=False, align=None):
+        lbl = QLabel(text)
+        style = f"color: {self.TEXT_COLOR}; font-size: {DPI(size)}px;"
+        if bold:
+            style += " font-weight: bold;"
+        lbl.setStyleSheet(style)
+        if align:
+            lbl.setAlignment(align)
+
+        lbl.setWordWrap(True)
+
+        if elide and " " not in text:
+            f = lbl.font()
+            f.setPixelSize(DPI(size))
+            f.setBold(bold)
+            fm = QFontMetrics(f)
+            limit = DPI(self.MAX_WIDTH - 40)
+            if fm.horizontalAdvance(text) > limit:
+                lbl.setText(fm.elidedText(text, Qt.ElideLeft, limit))
+        return lbl
+
+    def _create_media_label(self, path, is_gif=False):
+        lbl = QLabel()
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setContentsMargins(DPI(12), DPI(4), DPI(12), DPI(4))
+        if is_gif or path.endswith(".gif"):
+            movie = QMovie(path)
+            movie.setScaledSize(QSize(DPI(300), DPI(150)))
+            movie.start()
+            lbl.setMovie(movie)
+        else:
+            pix = QPixmap(path)
+            if not pix.isNull():
+                if pix.width() > DPI(300):
+                    pix = pix.scaledToWidth(DPI(300), Qt.SmoothTransformation)
+                lbl.setPixmap(pix)
+        return lbl
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -807,15 +973,13 @@ class QFlatTooltip(QWidget):
 
         # We draw the arrow color based on which section it attaches to
         side = getattr(self, "side", "top")
-        arrow_color = self.HEADER_COLOR if side == "top" else self.BG_COLOR
-        if not self.shortcuts:
-            arrow_color = self.BG_COLOR
+        arrow_color = self.BG_COLOR
 
         painter.setBrush(QColor(arrow_color))
 
         aw = DPI(self.ARROW_W)
         ah = DPI(self.ARROW_H)
-        ax = self.width() / 2
+        ax = getattr(self, "arrow_x", self.width() / 2)
 
         if side == "top":
             # Arrow on TOP edge, pointing UP
@@ -823,39 +987,72 @@ class QFlatTooltip(QWidget):
             painter.drawPolygon(poly)
         else:
             # Arrow on BOTTOM edge, pointing DOWN
-            poly = QPolygonF(
-                [QPointF(ax, self.height()), QPointF(ax - aw / 2, self.height() - ah - 1), QPointF(ax + aw / 2, self.height() - ah - 1)]
-            )
+            poly = QPolygonF([QPointF(ax, self.height()), QPointF(ax - aw / 2, self.height() - ah - 1), QPointF(ax + aw / 2, self.height() - ah - 1)])
             painter.drawPolygon(poly)
 
-    def show_around(self, widget):
-        self.adjustSize()
-        w, h = self.width(), self.height()
+    def show_around(self, widget, action_rect=None, target_rect=None):
+        self.action_rect = action_rect
+        self.target_rect = target_rect  # Global QRect
+        self.anchor_widget = widget
+
+        cursor_pos = QCursor.pos()
+        cursor_x = cursor_pos.x()
         ah = DPI(self.ARROW_H)
 
-        # Center X of target
-        target_global = widget.mapToGlobal(QPoint(widget.width() // 2, 0))
-        target_x = target_global.x()
-        target_y = target_global.y()
+        if target_rect:
+            # If a global rect is provided, use it directly
+            target_x = cursor_x
+            target_y = target_rect.bottom() + 1
+            widget_h = 0
+            self._global_anc = target_rect
+        elif action_rect:
+            # Map action rect to global coordinates
+            global_anc = QRect(widget.mapToGlobal(action_rect.topLeft()), action_rect.size())
+            target_x = cursor_x
+            target_y = global_anc.bottom() + 1
+            widget_h = 0
+            self._global_anc = global_anc
+            self.target_rect = global_anc
+        else:
+            target_global = widget.mapToGlobal(QPoint(0, 0))
+            target_x = cursor_x
+            target_y = target_global.y()
+            widget_h = widget.height()
+            self._global_anc = QRect(target_global, widget.size())
+            self.target_rect = self._global_anc
 
-        # Default: show on bottom
-        pos = QPoint(target_x - w // 2, target_y + widget.height() + DPI(2))
+        # Try BELOW position first
         self.side = "top"
-        self.main_layout.setContentsMargins(0, ah, 0, 0)  # Make room for arrow on top
+        self.main_layout.setContentsMargins(0, ah, 0, 0)
+        self.main_layout.activate()
+        self.adjustSize()
+        w, h = self.width(), self.height()
 
-        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        pos = QPoint(target_x - w // 2, target_y + widget_h + DPI(2))
+
+        screen = QGuiApplication.screenAt(cursor_pos) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
 
         if pos.y() + h > geo.bottom():
-            # Flip to top
-            pos.setY(target_y - h - DPI(2))
+            # Flip to ABOVE position
             self.side = "bottom"
-            self.main_layout.setContentsMargins(0, 0, 0, ah)  # Make room for arrow on bottom
+            self.main_layout.setContentsMargins(0, 0, 0, ah)
+            self.main_layout.activate()
+            self.adjustSize()
+            w, h = self.width(), self.height()
 
-        # Horizontal clamp
+            pos.setY(self._global_anc.top() - h - DPI(2))
+
+        # Horizontal clamping
         final_x = max(geo.left() + DPI(5), min(pos.x(), geo.right() - w - DPI(5)))
         pos.setX(final_x)
-
         self.move(pos)
-        self.show()
+
+        # Calculate relative arrow X position
+        arrow_x = target_x - final_x
+        aw = DPI(self.ARROW_W)
+        self.arrow_x = max(DPI(6) + aw / 2, min(arrow_x, w - DPI(6) - aw / 2))
+        self.update()
+
         self._auto_close_timer.start()
+        self.show()

@@ -566,17 +566,18 @@ class AttributePopup(QWidget):
     ALL_KEYFRAMES = "All Keyframes"
     CURRENT_KEYFRAMES = "Current Keyframes"
 
-    def __init__(self, item_widget, options, current_idx, current_indices, marked_indices, on_select):
+    def __init__(self, item_widget, on_select):
         super().__init__(item_widget.window())
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
 
         self.item_widget = item_widget
-        self.options = options
-        self.current_idx = current_idx
-        self.current_indices = current_indices
-        self.marked_indices = marked_indices
+        self.options = item_widget.options
+        self.current_idx = item_widget.current_idx
+        self.indices = item_widget.indices
+        self.current_indices = item_widget.current_indices
+        self.marked_indices = item_widget.marked_indices
         self.on_select = on_select
 
         any_obj = next(iter(item_widget.objects_map.values()))
@@ -711,11 +712,11 @@ class AttributePopup(QWidget):
 
         is_keyed = index in self.marked_indices
         is_current = index in self.current_indices
-        multi_current = len(self.current_indices) > 1
 
-        if is_current or is_keyed:
-            c = COLOR_BG_TRACK if not (is_current and multi_current) else COLOR_BLEND_MULTI
-            dot.setStyleSheet(f"background: {c}; border-radius: {dot_size // 2}px;")
+        if is_current:
+            dot.setStyleSheet(f"background: {COLOR_BG_TRACK}; border-radius: {dot_size // 2}px;")
+        elif is_keyed:
+            dot.setStyleSheet(f"background: {COLOR_BLEND_MULTI}; border-radius: {dot_size // 2}px;")
         else:
             dot.setStyleSheet("background: transparent;")
 
@@ -849,8 +850,9 @@ class AttributeItem(QWidget):
 
         self.options = any_obj.get("enum", [])
         self.current_indices = {obj.get("current") for obj in objects_map.values()}
-        self.current_idx = any_obj.get("current", 0)
         self.marked_indices = {idx for obj in objects_map.values() for idx in obj.get("marked", [])}
+        self.indices = self.current_indices | self.marked_indices
+        self.current_idx = any_obj.get("current", 0)
         self.gimbal_info = any_obj.get("gimbal", {})
 
         self.is_toggle = self.is_enum and len(self.options) <= 2
@@ -1420,7 +1422,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             # Only user-defined attrs (excludes Maya defaults), but allow rotateOrder if requested
             ordered_attrs = cmds.listAttr(node, ud=True) or []
             # only the ones with an output connection
-            ordered_attrs = [attr for attr in ordered_attrs if cmds.connectionInfo("%s.%s" % (node, attr), isSource=True)]
+            ordered_attrs = [attr for attr in ordered_attrs if not cmds.attributeQuery(attr, node=node, hidden=True)]
             if self.show_rotate_order and cmds.attributeQuery("rotateOrder", node=node, exists=True):
                 if "rotateOrder" not in ordered_attrs:
                     ordered_attrs.append("rotateOrder")
@@ -1601,7 +1603,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         # Otherwise, switch
         self._close_active_popup()
 
-        self._active_popup = AttributePopup(item, item.options, item.current_idx, item.current_indices, item.marked_indices, item.on_select)
+        self._active_popup = AttributePopup(item, item.on_select)
         self._active_popup.show_beside(item)
         item._hover_active = True
         item.update()

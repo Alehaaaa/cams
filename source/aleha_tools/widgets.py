@@ -40,6 +40,7 @@ try:
         Signal,
         QPointF,
         QPoint,
+        QRect,
         QRegularExpression,
         QMimeData,
         QTimer,
@@ -86,6 +87,7 @@ except ImportError:
         QRegExp,
         QPointF,
         QPoint,
+        QRect,
         QMimeData,
         QTimer,
     )
@@ -246,6 +248,63 @@ class OpenMenu(QMenu):
             parent.destroyed.connect(self.close)
 
         self.triggered.connect(self._on_action_triggered)
+        self.hovered.connect(self._on_action_hovered)
+        self._last_hovered_action = None
+
+    def addAction(self, *args, **kwargs):
+        description = kwargs.pop("description", None)
+        action = super().addAction(*args, **kwargs)
+        if description:
+            action.setProperty("description", description)
+            title = action.text().replace("&", "")
+            action.setStatusTip(f"{title} - {description}")
+        return action
+
+    def addMenu(self, *args, **kwargs):
+        description = kwargs.pop("description", None)
+        item = super().addMenu(*args, **kwargs)
+        if description:
+            # item can be QMenu or QAction depending on the overload
+            action = item.menuAction() if hasattr(item, "menuAction") else item
+            action.setProperty("description", description)
+            title = action.text().replace("&", "")
+            action.setStatusTip(f"{title} - {description}")
+        return item
+
+    def _on_action_hovered(self, action):
+        if not action or self.actionGeometry(action).isNull():
+            return
+
+        if action == self._last_hovered_action and TooltipManager.is_active():
+            return
+
+        TooltipManager.hide()
+        self._last_hovered_action = action
+
+        desc = action.property("description")
+        if desc:
+            title = action.text().replace("&", "")
+            template = f"<title>{title}</title><text>{desc}</text>"
+            
+
+            geometry = self.actionGeometry(action)
+            target_rect = QRect(self.mapToGlobal(geometry.topLeft()), geometry.size())
+            
+            icon = action.icon() if not action.icon().isNull() else None
+            TooltipManager.delayed_show(
+                text=title, anchor_widget=self, target_rect=target_rect, description=desc, template=template, icon_obj=icon
+            )
+
+    def hideEvent(self, event):
+        self._last_hovered_action = None
+        TooltipManager.hide()
+        super().hideEvent(event)
+
+    def leaveEvent(self, event):
+        self._last_hovered_action = None
+
+        TooltipManager.cancel_timer()
+        super().leaveEvent(event)
 
     def _on_action_triggered(self, action):
         if isinstance(action, QWidgetAction):
@@ -338,7 +397,6 @@ class QFlatCamButton(QPushButton):
         self._setup_icons()
         self._setup_styles()
         self._setup_inline_rename()
-        self._setup_tooltip()
         self._setup_event_handlers()
 
     def _emit_single_click(self):
@@ -478,23 +536,8 @@ class QFlatCamButton(QPushButton):
         self._click_timer.setInterval(250)
         self._click_timer.timeout.connect(self._emit_single_click)
 
-    def _setup_tooltip(self):
-        self._tooltip_timer = QTimer(self)
-        self._tooltip_timer.setSingleShot(True)
-        self._tooltip_timer.setInterval(800)
-        self._tooltip_timer.timeout.connect(self._show_tooltip)
-
-    def _show_tooltip(self):
-        if self.underMouse() and not self._renaming_active:
-            icon_path = return_icon_path(self.cam_type)
-            cam_name = "Maya Camera" if self.cam_type == "camera" else f"{self.cam_type.capitalize()} Camera"
-            desc = f"Manage this {cam_name}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports."
-            TooltipManager.show(self._camera, self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc)
-
     def _hide_tooltip(self):
-        self._tooltip_timer.stop()
-        # We no longer force-hide here as the QFlatTooltip manages its own
-        # distance-based closure now.
+        TooltipManager.hide()
 
     # Context Menu Management #################################################
     def _show_context_menu(self, pos):
@@ -719,12 +762,19 @@ class QFlatCamButton(QPushButton):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Enter:
-            self._tooltip_timer.start()
+            if not self._renaming_active:
+                icon_path = return_icon_path(self.cam_type)
+                cam_name = "Maya Camera" if self.cam_type == "camera" else f"{self.cam_type.capitalize()} Camera"
+                desc = f"Manage this {cam_name}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports."
+                TooltipManager.delayed_show(
+                    delay=800, text=self._camera, anchor_widget=self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc
+                )
+
             self._handle_key_modifiers()
             self._set_background_color("light")
 
         elif event.type() == QEvent.Leave:
-            self._hide_tooltip()
+            TooltipManager.cancel_timer()
             self.setIcon(self.icons["default"])
             self._set_background_color("base")
 
@@ -1264,9 +1314,7 @@ class Attributes(QFlatDialog):
 
                 target.setEnabled(settable)
 
-        self.focal_length_slider.valueChanged.connect(
-            lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value())))
-        )
+        self.focal_length_slider.valueChanged.connect(lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value()))))
 
         self.overscan_slider.valueChanged.connect(lambda: self.overscan_value.setText(str(self.get_float(self.overscan_slider.value()))))
 
