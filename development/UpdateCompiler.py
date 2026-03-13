@@ -230,6 +230,8 @@ class CompileCams:
                     continue
 
                 if item.is_file():
+                    if item.name.endswith(".pyc"):
+                        continue
                     self.create_progressbar(mainBar, item.name)
                     arc_name = Path("aleha_tools") / item.relative_to(source_path)
                     zipf.write(item, arcname=arc_name)

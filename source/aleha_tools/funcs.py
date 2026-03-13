@@ -38,7 +38,7 @@ from .util import (
     compare_versions,
     find_shelf_button,
 )
-from .base_widgets import QFlatConfirmDialog
+from .base_widgets import QFlatConfirmDialog, QFlatTooltipManager
 
 long = int
 
@@ -80,16 +80,17 @@ def install_userSetup(uninstall=False):
     except IOError:
         newUserSetup = ""
 
-    CamsRunCode = (
-        startCode
-        + "\n\n"
-        + cmds_import
-        + 'if not cmds.about(batch=True):\n    cmds.evalDeferred(lambda: cmds.evalDeferred("import aleha_tools.cams as cams; cams.show()", lowestPriority=True))\n\n'
-        + endCode
+    run_script = "import aleha_tools.cams as cams; cams.show()"
+    cams_run_code = (
+        f"{startCode}\n\n"
+        f"{cmds_import}"
+        f"if not cmds.about(batch=True):\n"
+        f'    cmds.evalDeferred(lambda: cmds.evalDeferred("{run_script}", lowestPriority=True))\n\n'
+        f"{endCode}"
     )
 
     if not uninstall:
-        newUserSetup += CamsRunCode
+        newUserSetup += cams_run_code
 
     # Write the updated userSetup file
     with open(userSetupFile, "w") as output_file:
@@ -209,24 +210,27 @@ def display_menu_elements(commands=False):
 
 
 def get_cam_display(cam_panels, command, plugin=False):
-    if plugin:
-        run_command = "cmds.modelEditor('" + cam_panels[-1] + "', q=1, queryPluginObjects='" + command + "')"
-    else:
-        run_command = "cmds.modelEditor('" + cam_panels[-1] + "', q=1, " + command + "=1 )"
+    if not cam_panels:
+        return None
+    editor = cam_panels[-1]
     try:
-        cleaned_run_command = "".join(c for c in run_command if c.isprintable())
-        value = eval(cleaned_run_command)
-        return value
+        if plugin:
+            return cmds.modelEditor(editor, q=True, queryPluginObjects=command)
+        return cmds.modelEditor(editor, q=True, **{command: True})
     except Exception:
         return None
 
 
 def set_cam_display(cam_panels, command, plugin=False, switch=None):
-    var = get_cam_display(cam_panels, command, plugin) if switch is None else not switch
-    for i in cam_panels:
-        e_cmd = "pluginObjects=('{}', {})".format(command, not var) if plugin else "{}={}".format(command, not var)
+    current_state = get_cam_display(cam_panels, command, plugin)
+    new_state = (not current_state) if switch is None else bool(switch)
+
+    for panel in cam_panels:
         try:
-            eval("cmds.modelEditor('{}', e=1, {})".format(i, e_cmd))
+            if plugin:
+                cmds.modelEditor(panel, e=True, pluginObjects=(command, new_state))
+            else:
+                cmds.modelEditor(panel, e=True, **{command: new_state})
         except Exception:
             continue
 
@@ -293,7 +297,7 @@ def drag_insert_camera(camera, parent, pos):
         tear_window = tear_off_cam(camera)
         cmds.workspaceControl(tear_window, e=True, rsh=600, rsw=900)
         window_widget = omui.MQtUtil.findControl(tear_window)
-        floating_window = wrapInstance(int(window_widget), QWidget)
+        floating_window = wrapInstance(long(window_widget), QWidget)
 
         # Get the parent widget of the floating window
         main_parent_widget = floating_window.parent().parent().parent().parent()
@@ -501,6 +505,7 @@ def close_all_Windows(ui="CamsWorkspaceControl"):
             pass
 
     force_kill_scriptJobs()
+    QFlatTooltipManager.hide()
 
 
 def close_UI(ui, confirm=True):

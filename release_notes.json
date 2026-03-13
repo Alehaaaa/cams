@@ -1,5 +1,10 @@
 {
     "versions": {
+        "0.2.90": [
+            "Reorganized and refactored many components.",
+            "Added tooltips for all menus.",
+            "And much more..."
+        ],
         "0.2.86-hotfix": [
             "Tooltip keys can be plain text.",
             "Added \"Double Click\" rename in tooltip shortcuts.",

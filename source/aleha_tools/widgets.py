@@ -54,6 +54,7 @@ except ImportError:
         QPushButton,
         QFrame,
         QMenu,
+        QAction,
         QWidgetAction,
         QActionGroup,
         QApplication,
@@ -126,19 +127,17 @@ from .funcs import (
 from .base_widgets import (
     QFlatDialog,
     QFlatConfirmDialog,
-    TooltipManager,
+    QFlatTooltipManager,
 )
 from . import DATA
 
 CONTEXTUAL_CURSOR = QCursor(QPixmap(":/rmbMenu.png"), hotX=11, hotY=8)
 
 
-# """
 # QPainter for the cameras shelf tabBar
-# """
 
 
-class ShelfPainter(QWidget):
+class QFlatShelfPainter(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.tabbar_width = DPI(16)
@@ -199,12 +198,10 @@ class ShelfPainter(QWidget):
         self.update()
 
 
-"""
-QMenu that doesn't close
-"""
+# QMenu that doesn't close
 
 
-class MenuTitleAction(QWidgetAction):
+class QFlatMenuTitleAction(QWidgetAction):
     def __init__(self, version, parent=None):
         super().__init__(parent)
         self.version = version
@@ -240,7 +237,7 @@ class MenuTitleAction(QWidgetAction):
         return label
 
 
-class OpenMenu(QMenu):
+class QFlatMenu(QMenu):
     def __init__(self, title=None, parent=None):
         super().__init__(title, parent) if title else super().__init__(parent)
 
@@ -256,7 +253,7 @@ class OpenMenu(QMenu):
         action = super().addAction(*args, **kwargs)
         if description:
             action.setProperty("description", description)
-            title = action.text().replace("&", "")
+            title = action.text().replace("&", "").strip()
             action.setStatusTip(f"{title} - {description}")
         return action
 
@@ -267,7 +264,7 @@ class OpenMenu(QMenu):
             # item can be QMenu or QAction depending on the overload
             action = item.menuAction() if hasattr(item, "menuAction") else item
             action.setProperty("description", description)
-            title = action.text().replace("&", "")
+            title = action.text().replace("&", "").strip()
             action.setStatusTip(f"{title} - {description}")
         return item
 
@@ -275,39 +272,44 @@ class OpenMenu(QMenu):
         if not action or self.actionGeometry(action).isNull():
             return
 
-        if action == self._last_hovered_action and TooltipManager.is_active():
+        if action == self._last_hovered_action and QFlatTooltipManager.is_active():
             return
 
-        TooltipManager.hide()
+        QFlatTooltipManager.hide()
         self._last_hovered_action = action
 
         desc = action.property("description")
         if desc:
-            title = action.text().replace("&", "")
+            title = action.text().replace("&", "").strip()
             template = f"<title>{title}</title><text>{desc}</text>"
 
             geometry = self.actionGeometry(action)
             target_rect = QRect(self.mapToGlobal(geometry.topLeft()), geometry.size())
 
             icon = action.icon() if not action.icon().isNull() else None
-            TooltipManager.delayed_show(
+            QFlatTooltipManager.delayed_show(
                 text=title, anchor_widget=self, target_rect=target_rect, description=desc, template=template, icon_obj=icon
             )
 
     def hideEvent(self, event):
         self._last_hovered_action = None
-        TooltipManager.hide()
+        QFlatTooltipManager.hide()
         super().hideEvent(event)
 
     def leaveEvent(self, event):
         self._last_hovered_action = None
 
-        TooltipManager.cancel_timer()
+        QFlatTooltipManager.cancel_timer()
         super().leaveEvent(event)
 
     def _on_action_triggered(self, action):
         if isinstance(action, QWidgetAction):
             return
+
+
+class QFlatOpenMenu(QFlatMenu):
+    def __init__(self, title=None, parent=None):
+        super().__init__(title, parent) if title else super().__init__(parent)
 
     def mouseReleaseEvent(self, e):
         action = self.actionAt(e.pos())
@@ -325,9 +327,7 @@ class OpenMenu(QMenu):
             super().mouseReleaseEvent(e)
 
 
-"""
-QLineEdit that doesn't trigger next action
-"""
+# QLineEdit that doesn't trigger next action
 
 
 class QFlatRenameEdit(QLineEdit):
@@ -338,9 +338,7 @@ class QFlatRenameEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
-"""
-QPushButton hover detection
-"""
+# QPushButton hover detection
 
 
 class QFlatCamButton(QPushButton):
@@ -455,7 +453,7 @@ class QFlatCamButton(QPushButton):
                 dy = (self.height() // 2) - DPI(4) + i * DPI(4)
                 painter.drawEllipse(QPointF(dots_x + dots_size / 2, dy), DPI(1.5), DPI(1.5))
 
-    # Initialization Helpers ##################################################
+    # INITIALIZATION HELPERS ##################################################
     def _initialize_camera_type(self):
         self.cam_type = "camera"
         type_attr = "%s.cams_type" % self._camera
@@ -540,7 +538,7 @@ class QFlatCamButton(QPushButton):
         self._click_timer.timeout.connect(self._emit_single_click)
 
     def _hide_tooltip(self):
-        TooltipManager.hide()
+        QFlatTooltipManager.hide()
 
     # Context Menu Management #################################################
     def _show_context_menu(self, pos):
@@ -550,7 +548,7 @@ class QFlatCamButton(QPushButton):
 
         self._set_background_color("light")
 
-        menu = OpenMenu()
+        menu = QFlatOpenMenu()
         self._build_context_menu(menu)
         menu.exec_(self.mapToGlobal(pos))
 
@@ -593,8 +591,12 @@ class QFlatCamButton(QPushButton):
         menu.addAction(action)
 
     def _add_selection_actions(self, menu):
-        self.select_action = menu.addAction(self.icons["select"], "Select", partial(select_cam, self._camera, self))
-        self.deselect_action = menu.addAction(self.icons["deselect"], "Deselect", partial(deselect_cam, self._camera, self))
+        self.select_action = menu.addAction(
+            self.icons["select"], "Select", partial(select_cam, self._camera, self), description="Select the camera in the scene."
+        )
+        self.deselect_action = menu.addAction(
+            self.icons["deselect"], "Deselect", partial(deselect_cam, self._camera, self), description="Remove the camera from the selection."
+        )
 
         is_selected = self._camera in (cmds.ls(selection=True) or [])
         self.select_action.setVisible(not is_selected)
@@ -605,6 +607,7 @@ class QFlatCamButton(QPushButton):
             self.icons["duplicate"],
             "Duplicate",
             partial(duplicate_cam, self._camera, self),
+            description="Create an independent copy of this camera with the same attributes.",
         )
 
     def _add_rename_section(self, menu):
@@ -612,86 +615,121 @@ class QFlatCamButton(QPushButton):
             return
 
         # Trigger inline rename on the BUTTON
-        menu.addAction(self.icons["rename"], "Rename", self.start_inline_rename)
+        menu.addAction(self.icons["rename"], "Rename", self.start_inline_rename, description="Change the name of the camera and its rig components.")
 
     def _add_default_camera_menu(self, menu):
         if self._camera == self._parentUI.default_cam[0]:
-            default_cam_menu = OpenMenu("Default camera")
+            default_cam_menu = QFlatOpenMenu("Default camera")
             default_cam_menu.setIcon(self.icons["default"])
             default_cam_menu_grp = QActionGroup(self)
 
             for c in get_cameras(default=True):
-                action = default_cam_menu.addAction(c, partial(self._set_default_cam, (c, True), menu))
+                description = "Set this camera as the new primary/default camera."
+                action = default_cam_menu.addAction(c, partial(self._set_default_cam, (c, True), menu), description=description)
                 default_cam_menu_grp.addAction(action)
                 action.setCheckable(True)
                 if c == self._camera:
                     action.setChecked(True)
                     action.setEnabled(False)
-            menu.addMenu(default_cam_menu)
+            menu.addMenu(default_cam_menu, description="Change which camera is considered the 'Main' or default one for this UI.")
         menu.addSeparator()
 
     def _set_default_cam(self, default_cam, menu):
         self._parentUI.process_prefs(cam=default_cam)
         menu.close()
 
+    # VIEWPORT DISPLAY MANAGEMENT #############################################
+    # Methods for building and managing the "Viewport Show" context menu.
+    # Features custom two-way synchronization between category headers
+    # and their individual child elements.
+
     def _add_display_options_menu(self, menu):
-        display_menu = OpenMenu("Viewport Show")
+        """Adds the Viewport Show submenu to the main context menu."""
+        display_menu = QFlatOpenMenu("Viewport Show")
         display_menu.setTearOffEnabled(True)
         self._build_display_menu(display_menu)
-        menu.addMenu(display_menu)
+
+        desc = "Quickly toggle visibility of specific object types in the viewports where this camera is active."
+        menu.addMenu(display_menu, description=desc)
 
     def _build_display_menu(self, menu):
+        """Constructs the contents of the Viewport Show menu with synced headers."""
         self.show_elements = display_menu_elements()
-
         cam_panels = get_panels_from_camera(self._camera)
         preferences = get_preferences_display(self._camera)
 
-        for section, elements in self.show_elements.items():
+        for section_name, elements in self.show_elements.items():
             menu.addSeparator()
-            section_action = menu.addAction(section)
+
+            # Create section header
+            section_action = menu.addAction(section_name, description=f"Toggle visibility for all {section_name}.")
             section_action.setCheckable(True)
 
-            element_actions = []
+            # Group children data for sync logic
+            element_data = []
             for label, attr, is_plugin in elements:
-                action = menu.addAction("     %s" % label)
+                action = menu.addAction(f"     {label}", description=f"Toggle visibility for {label.strip()}.")
                 action.setCheckable(True)
+
+                # Set initial state from scene or preferences
                 state = self._get_display_state(attr, is_plugin, cam_panels, preferences)
                 action.setChecked(state)
-                element_actions.append((action, attr, is_plugin))
 
-            section_state = all(a[0].isChecked() for a in element_actions)
-            section_action.setChecked(section_state)
+                info = (action, attr, is_plugin)
+                element_data.append(info)
 
-            # Connect actions
-            section_action.triggered.connect(partial(self._toggle_section, section_action, element_actions))
-            for action, attr, is_plugin in element_actions:
-                action.triggered.connect(partial(self._update_display_attribute, attr, is_plugin, action))
+                # Each child item updates the Maya attribute and syncs the parent header
+                action.triggered.connect(partial(self._on_display_item_toggled, section_action, element_data, info))
 
-    # Display State Management ################################################
+            # Initial sync of section header state
+            self._sync_display_section(section_action, element_data)
+
+            # Header toggle: applies the calculated next state to all children
+            section_action.triggered.connect(partial(self._on_display_section_toggled, section_action, element_data))
+
+    def _on_display_item_toggled(self, section_action, element_data, item_info):
+        """Handles single item toggle: updates Maya and syncs parent header."""
+        action, attr, is_plugin = item_info
+        self._update_display_attribute(attr, is_plugin, action.isChecked())
+        self._sync_display_section(section_action, element_data)
+
+    def _on_display_section_toggled(self, section_action, element_data):
+        """Handles header toggle: turns all children ON if any are OFF, otherwise turns all OFF."""
+        child_states = [action.isChecked() for action, _, _ in element_data]
+        target_state = not all(child_states)
+
+        for action, attr, is_plugin in element_data:
+            if action.isChecked() != target_state:
+                action.setChecked(target_state)
+                self._update_display_attribute(attr, is_plugin, target_state)
+
+        self._sync_display_section(section_action, element_data)
+
+    def _sync_display_section(self, section_action, element_data):
+        """Updates header visual state: 'Checked' only if ALL children are ON."""
+        all_on = all(action.isChecked() for action, _, _ in element_data)
+        section_action.setChecked(all_on)
+
     def _get_display_state(self, attribute, is_plugin, panels, preferences):
+        """Gets the current visibility state for an attribute."""
         if panels:
-            state = get_cam_display(panels, attribute, is_plugin)
-            return state or False
-        state = preferences.get(attribute, (None, False))[1]
-        return state or False
-
-    def _toggle_section(self, section_action, elements):
-        state = section_action.isChecked()
-        for action, attr, is_plugin in elements:
-            action.setChecked(state)
-            self._update_display_attribute(attr, is_plugin, state)
+            return get_cam_display(panels, attribute, is_plugin) or False
+        return preferences.get(attribute, (None, False))[1] or False
 
     def _update_display_attribute(self, attribute, is_plugin, state):
+        """Communicates the visibility change to Maya and saves it to the camera node."""
         if isinstance(state, QAction):
             state = state.isChecked()
-        panels = get_panels_from_camera(self._camera)
 
+        panels = get_panels_from_camera(self._camera)
         if panels:
             set_cam_display(panels, attribute, is_plugin, state)
+
         save_display_to_cam(self._camera, [(attribute, is_plugin, state)])
 
+    # MOUSE AND EVENT HANDLERS ################################################
     def mousePressEvent(self, event):
-        TooltipManager.hide()  # Force hide on interaction
+        QFlatTooltipManager.hide()  # Force hide on interaction
         if event.button() == Qt.LeftButton:
             self._click_timer.stop()
             self._start_pos = event.pos()
@@ -747,7 +785,7 @@ class QFlatCamButton(QPushButton):
         drag.setPixmap(self.grab())
         drag.setHotSpot(event.pos() - self.rect().topLeft())
 
-        TooltipManager.hide()  # Force hide on drag
+        QFlatTooltipManager.hide()  # Force hide on drag
         self.setDown(False)
         self._set_background_color("base")  # Reset to base before drag starts
         self.setIcon(self.icons["default"])  # Reset icon
@@ -769,7 +807,7 @@ class QFlatCamButton(QPushButton):
                 icon_path = return_icon_path(self.cam_type)
                 cam_name = "Maya Camera" if self.cam_type == "camera" else f"{self.cam_type.capitalize()} Camera"
                 desc = f"Manage this {cam_name}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports."
-                TooltipManager.delayed_show(
+                QFlatTooltipManager.delayed_show(
                     delay=800, text=self._camera, anchor_widget=self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc
                 )
 
@@ -777,7 +815,7 @@ class QFlatCamButton(QPushButton):
             self._set_background_color("light")
 
         elif event.type() == QEvent.Leave:
-            TooltipManager.cancel_timer()
+            QFlatTooltipManager.cancel_timer()
             self.setIcon(self.icons["default"])
             self._set_background_color("base")
 
@@ -830,7 +868,7 @@ class QFlatCamButton(QPushButton):
             elif act_type == "tear_off":
                 action = partial(tear_off_cam, self._camera)
             elif act_type == "attributes":
-                action = partial(Attributes.showUI, self._camera, self.window())
+                action = partial(QFlatAttributesDialog.showUI, self._camera, self.window())
 
         self.setIcon(self.icons[icon_name])
         try:
@@ -913,6 +951,7 @@ class QFlatCamButton(QPushButton):
                 QIcon(return_icon_path("aim")),
                 "Position Aim",
                 partial(self._position_aim_offset, offset_attr),
+                description="Select the aim target locator to reposition where the camera is looking.",
             )
 
     def _add_follow_actions(self, menu):
@@ -939,14 +978,16 @@ class QFlatCamButton(QPushButton):
                 if not cmds.objExists(follow_mode_attr):
                     return
 
-                follow_mode_menu = OpenMenu("Follow Mode")
+                follow_mode_menu = QFlatOpenMenu("Follow Mode")
                 current_mode = cmds.getAttr(follow_mode_attr)
 
                 modes = [("Position, Rotation", True), ("Only Position", False)]
 
                 group = QActionGroup(self)
                 for label, mode in modes:
-                    action = follow_mode_menu.addAction(label)
+                    action = follow_mode_menu.addAction(
+                        label, description="Set whether the camera follows both Position and Rotation, or just Position."
+                    )
                     action.setCheckable(True)
                     action.setChecked(mode == current_mode)
                     action.triggered.connect(partial(cmds.setAttr, follow_mode_attr, mode))
@@ -954,7 +995,7 @@ class QFlatCamButton(QPushButton):
 
                 follow_mode_menu.addSeparator()
 
-                mute_menu = OpenMenu("Active Channels", self)
+                mute_menu = QFlatOpenMenu("Active Channels", self)
                 mute_menu.setTearOffEnabled(True)
 
                 mute_channels = [
@@ -969,14 +1010,14 @@ class QFlatCamButton(QPushButton):
                 for name, channel in mute_channels:
                     mute_channel_attr = "%s.%s" % (camera_grp, channel)
 
-                    action = mute_menu.addAction(name)
+                    action = mute_menu.addAction(name, description=f"Toggle tracking for the {name} channel.")
                     action.setCheckable(True)
                     action.setChecked(not cmds.mute(mute_channel_attr, q=True))
                     action.triggered.connect(partial(self._mute_follow_channel, action, mute_channel_attr))
 
-                follow_mode_menu.addMenu(mute_menu)
+                follow_mode_menu.addMenu(mute_menu, description="Choose which translation and rotation channels are driven by the follow target.")
 
-                menu.addMenu(follow_mode_menu)
+                menu.addMenu(follow_mode_menu, description="Configure how the camera follows its target object.")
 
     def _mute_follow_channel(self, action, channel):
         cmds.mute(channel, disable=action.isChecked())
@@ -993,7 +1034,11 @@ class QFlatCamButton(QPushButton):
         self._add_delete_action(menu)
 
     def _add_filmgate_action(self, menu):
-        action = menu.addAction("FilmGate Mask", self._toggle_filmgate)
+        action = menu.addAction(
+            "FilmGate Mask",
+            self._toggle_filmgate,
+            description="Toggle the visibility of the Film Gate and its mask on the camera.",
+        )
         action.setCheckable(True)
         action.setChecked(cmds.getAttr("%s.displayFilmGate" % self._camera) and cmds.getAttr("%s.displayGateMask" % self._camera))
 
@@ -1005,7 +1050,8 @@ class QFlatCamButton(QPushButton):
         menu.addAction(
             self.icons["attributes"],
             "Attributes",
-            partial(Attributes.showUI, self._camera, self.window()),
+            partial(QFlatAttributesDialog.showUI, self._camera, self.window()),
+            description="Open the detailed attribute editor for this specific camera.",
         )
 
     def _add_defaults_action(self, menu):
@@ -1013,10 +1059,16 @@ class QFlatCamButton(QPushButton):
             QIcon(return_icon_path("default")),
             "Apply Defaults",
             partial(self._parentUI.apply_camera_default, self._camera, self),
+            description="Revert the camera's visual settings (FOV, Near/Far clip, etc.) to your saved defaults.",
         )
 
     def _add_tearoff_action(self, menu):
-        menu.addAction(self.icons["tear_off"], "Tear Off Copy", partial(tear_off_cam, self._camera))
+        menu.addAction(
+            self.icons["tear_off"],
+            "Tear Off Copy",
+            partial(tear_off_cam, self._camera),
+            description="Create a new floating viewport window displaying this camera's view.",
+        )
 
     def _add_delete_action(self, menu):
         if self._camera != self._parentUI.default_cam[0] and not cmds.referenceQuery(self._camera, isNodeReferenced=True):
@@ -1025,6 +1077,7 @@ class QFlatCamButton(QPushButton):
                 self.icons["remove"],
                 "Delete",
                 partial(delete_cam, self._camera, self._parentUI),
+                description="Permanently remove this camera and its rig from the Maya scene.",
             )
 
     # Aim Offset Handling #####################################################
@@ -1070,12 +1123,10 @@ class QFlatCamButton(QPushButton):
         raise ValueError("No valid aim offset found")
 
 
-"""
-QScroll for the cameras layout
-"""
+# QScroll for the cameras layout
 
 
-class HorizontalScrollArea(QScrollArea):
+class QFlatScrollArea(QScrollArea):
     def __init__(self, height, parent=None):
         super().__init__(parent)
 
@@ -1101,12 +1152,10 @@ class HorizontalScrollArea(QScrollArea):
         super().wheelEvent(event)
 
 
-"""
-Attributes
-"""
+# CAMERA ATTRIBUTES DIALOG #################################################
 
 
-class Attributes(QFlatDialog):
+class QFlatAttributesDialog(QFlatDialog):
     dlg_instance = None
 
     @classmethod
@@ -1117,7 +1166,7 @@ class Attributes(QFlatDialog):
         except Exception:
             pass
 
-        cls.dlg_instance = Attributes(cams, parent)
+        cls.dlg_instance = QFlatAttributesDialog(cams, parent)
         cls.dlg_instance.show()
 
     def __init__(self, cam, parent=None):
@@ -1317,9 +1366,7 @@ class Attributes(QFlatDialog):
 
                 target.setEnabled(settable)
 
-        self.focal_length_slider.valueChanged.connect(
-            lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value())))
-        )
+        self.focal_length_slider.valueChanged.connect(lambda: self.focal_length_value.setText(str(self.get_float(self.focal_length_slider.value()))))
 
         self.overscan_slider.valueChanged.connect(lambda: self.overscan_value.setText(str(self.get_float(self.overscan_slider.value()))))
 
@@ -1360,9 +1407,7 @@ class Attributes(QFlatDialog):
 
         lock_btn.setVisible(False)
 
-    """
-    Create functions
-    """
+    # MODIFICATION METHODS ####################################################
 
     def apply_modifications(self, cam, close=False):
         cmds.undoInfo(chunkName="applyCamAttributes", openChunk=True)
@@ -1431,12 +1476,10 @@ class Attributes(QFlatDialog):
             self.gate_mask_color_slider.setValue(v)
 
 
-"""
-Default Settings
-"""
+# DEFAULT SETTINGS DIALOG ##################################################
 
 
-class DefaultSettings(QFlatDialog):
+class QFlatSettingsDialog(QFlatDialog):
     dlg_instance = None
 
     @classmethod
@@ -1447,7 +1490,7 @@ class DefaultSettings(QFlatDialog):
         except Exception:
             pass
 
-        cls.dlg_instance = DefaultSettings(parent)
+        cls.dlg_instance = QFlatSettingsDialog(parent)
         cls.dlg_instance.show()
 
     def __init__(self, parent=None):
@@ -1662,13 +1705,11 @@ class DefaultSettings(QFlatDialog):
             self.close()
 
 
-"""
-Coffee window
-"""
+# ABOUT DIALOG #############################################################
 
 
-class Coffee(QFlatDialog):
-    _instance = None
+class QFlatAboutDialog(QFlatDialog):
+    dlg_instance = None
     _check_updates = Signal()
 
     @classmethod
@@ -1679,12 +1720,12 @@ class Coffee(QFlatDialog):
         if cmds.window(name, exists=True):
             cmds.deleteUI(name)
 
-        cls._instance = Coffee(parent, data=data)
-        cls._instance.show()
-        cls._instance.raise_()
-        cls._instance.activateWindow()
+        cls.dlg_instance = QFlatAboutDialog(parent, data=data)
+        cls.dlg_instance.show()
+        cls.dlg_instance.raise_()
+        cls.dlg_instance.activateWindow()
 
-        return cls._instance
+        return cls.dlg_instance
 
     def __init__(self, parent=None, data=None):
         super().__init__(parent)

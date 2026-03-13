@@ -1,4 +1,4 @@
 __pycache__/
-# development/
 .DS_Store
 .env
+*.pyc

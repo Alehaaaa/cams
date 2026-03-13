@@ -1059,7 +1059,7 @@ class SetupTargetsDialog(FloatingWidget):
         self.objects_dict = objects_dict
         self._create_layouts()
         self.setBottomBar(
-            [base_widgets.DialogButton("Add", callback=self._add_target, icon=util.return_icon_path("add"), highlight=True)],
+            [base_widgets.QFlatDialogButton("Add", callback=self._add_target, icon=util.return_icon_path("add"), highlight=True)],
             closeButton=True,
             spacing=util.DPI(2),
         )
@@ -1114,7 +1114,7 @@ class TargetItemWidget(QWidget):
 
         label = QLabel(name.split(":")[-1])
         close_btn = QPushButton()
-        base_widgets.HoverableIcon.apply(close_btn, util.return_icon_path("close"))
+        base_widgets.QFlatHoverableIcon.apply(close_btn, util.return_icon_path("close"))
 
         close_btn.setIconSize(QSize(15, 15))
         close_btn.setFixedSize(15, 15)
@@ -1880,26 +1880,26 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def _show_context_menu(self, pos):
         """Displays global tool configuration menu."""
-        self.context_menu = QMenu(self)
+        self.context_menu = widgets.QFlatMenu(self)
         self.context_menu.aboutToShow.connect(self._suspend_auto_close)
         self.context_menu.aboutToHide.connect(self._resume_auto_close)
 
-        self.toggle_namespaces_action = self.context_menu.addAction("Show namespaces")
+        self.toggle_namespaces_action = self.context_menu.addAction("Show namespaces", description="Toggle namespace visibility in the viewport.")
         self.toggle_namespaces_action.setCheckable(True)
         self.toggle_namespaces_action.setChecked(self.namespace_display)
 
-        self.show_rotate_order_action = self.context_menu.addAction("Enable Rotate Order")
+        self.show_rotate_order_action = self.context_menu.addAction("Enable Rotate Order", description="Enable rotate order in the viewport.")
         self.show_rotate_order_action.setCheckable(True)
         self.show_rotate_order_action.setChecked(self.show_rotate_order)
 
         self.context_menu.addSeparator()
 
-        self.euler_filter_action = self.context_menu.addAction("Auto Euler Filter")
+        self.euler_filter_action = self.context_menu.addAction("Auto Euler Filter", description="Enable auto euler filter.")
         self.euler_filter_action.setCheckable(True)
         self.euler_filter_action.setChecked(self.euler_filter)
 
         self.context_menu.addSeparator()
-        self.about_action = self.context_menu.addAction("About")
+        self.about_action = self.context_menu.addAction("About", description="Show credits dialog.")
         self.about_action.setIcon(QIcon(util.return_icon_path("info")))
         self.about_action.triggered.connect(self.show_credits_dialog)
 
@@ -1927,9 +1927,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     def show_credits_dialog(self):
         """Displays credits/donation dialog."""
         self._suspend_auto_close()
-        widgets.Coffee.showUI(self, data=DATA)
-        if widgets.Coffee._instance:
-            widgets.Coffee._instance.finished.connect(lambda *args: self._resume_auto_close())
+        widgets.QFlatAboutDialog.showUI(self, data=DATA)
+        if widgets.QFlatAboutDialog.dlg_instance:
+            widgets.QFlatAboutDialog.dlg_instance.finished.connect(lambda *args: self._resume_auto_close())
 
     # =================================================================================
     #  7. APPLICATION ACTIONS

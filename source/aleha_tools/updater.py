@@ -23,7 +23,7 @@ import maya.mel as mel
 
 from . import funcs, util
 from .util import compare_versions
-from .base_widgets import QFlatConfirmDialog
+from .base_widgets import QFlatConfirmDialog, QFlatTooltipConfirm
 
 # Constants
 REPO = "https://raw.githubusercontent.com/Alehaaaa/camstool/main/"
@@ -343,28 +343,27 @@ def _check_for_updates(ui, warning=True, force=False):
             return
 
         last_release_notes = changelog.get("versions", {}).get(latest_version, [])
-        formated_changelog = "<br>".join(["- " + line for line in last_release_notes])
+        formated_changelog = "<br/>".join(["- " + line.replace("<", "&lt;").replace(">", "&gt;") for line in last_release_notes])
 
-        update_available = QFlatConfirmDialog(
-            window="Update for " + ui.TITLE,
-            title="<b>Version %s available</b><br>(using %s)" % (latest_version, installed_version),
-            message=formated_changelog,
+        template = f"<title>Version {latest_version} available\n(using {installed_version})</title><text>These are the changes made:</text><separator/><text>{formated_changelog}</text>"
+
+        result = QFlatTooltipConfirm.question(
+            ui.menu_bar,
+            title="Update available",
+            template=template,
             icon=util.return_icon_path("update.svg"),
             buttons=[
-                QFlatConfirmDialog.CustomButton("Install", positive=True, icon=util.return_icon_path("install")),
-                QFlatConfirmDialog.CustomButton("Skip", positive=True, icon=util.return_icon_path("skip")),
+                QFlatTooltipConfirm.CustomButton("Install", positive=True, icon=util.return_icon_path("install")),
+                QFlatTooltipConfirm.CustomButton("Skip", positive=True, icon=util.return_icon_path("skip")),
+                QFlatTooltipConfirm.No,
             ],
             highlight="Install",
-            exclusive=False,
-            parent=ui,
         )
-        update_available.title_label.setWordWrap(False)
-        update_available.adjustSize()
 
-        if update_available.confirm():
+        if result and result.get("positive"):
             funcs.install_userSetup()
 
-            if update_available.clicked_button == "Install":
+            if result.get("name") == "Install":
                 from . import updater
 
                 reload(updater)
@@ -381,19 +380,18 @@ def _check_for_updates(ui, warning=True, force=False):
                     reload(aleha_tools)
                     reload(cams)
                     cams.show()
-                    QFlatConfirmDialog.question(
-                        None,
-                        "%s Update" % ui.TITLE,
-                        "You have successfully updated the tool!<br><br>" + "These were the last changes:<br>" + formated_changelog,
+
+                    QFlatTooltipConfirm.information(
+                        ui.menu_bar,
+                        message="You have successfully updated the tool!<br><br>" + "These were the last changes:<br>" + formated_changelog,
                         title="Installed %s %s" % (ui.TITLE, latest_version.replace("\n", "").replace("\r", "")),
                         icon=util.return_icon_path("success.svg"),
-                        closeButton=True,
                     )
 
                 QTimer.singleShot(0, _post_update)
                 ui.process_prefs(skip_update=False)
 
-            elif update_available.clicked_button == "Skip":
+            elif result.get("name") == "Skip":
                 ui.process_prefs(skip_update=True)
 
     # Delay startup check slightly to ensure UI is ready
