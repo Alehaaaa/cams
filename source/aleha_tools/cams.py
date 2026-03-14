@@ -940,17 +940,18 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             selected = self.hud_settings["selected"]
 
             for ind, p in enumerate(hud_presets):
-                preset = QAction(p, self)
+                preset = self.menu_presets.addAction(p, description="Set HUD to preset %s" % p)
                 preset.setCheckable(True)
                 presets_ac_group.addAction(preset)
-                self.menu_presets.addAction(preset)
                 if ind == selected:
                     preset.setChecked(True)
                 preset.triggered.connect(partial(self.hud_preset_triggered, ind, hud_presets[p]))
 
         self.menu_presets.addSeparator()
 
-        self.hud_editor = self.menu_presets.addAction("HUD Editor")
+        self.hud_editor = self.menu_presets.addAction(
+            "HUD Editor", description="Manage, customize, and apply Heads Up Display (HUD) overlays on your viewport."
+        )
         self.hud_editor.triggered.connect(partial(funcs.run_tools, "HUDWindow", self))
 
     def hud_preset_triggered(self, hud_index, preset):
