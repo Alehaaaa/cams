@@ -14,6 +14,7 @@ else:
     import urllib2 as urllib_request
     import urllib2 as urllib_error
     import httplib
+
     responses = httplib.responses
 
 try:
@@ -360,7 +361,7 @@ def _check_for_updates(ui, warning=True, force=False):
 
         formated_changelog = "<br/>".join(all_notes)
         template = (
-            "<title>Version {} available (using {})</title>\n".format(latest_version, installed_version)
+            "<title>Version {} available\n(using {})</title>\n".format(latest_version, installed_version)
             + "<text>These are the changes made:</text>\n"
             + "<text>{}</text>\n".format(formated_changelog)
         )
@@ -401,7 +402,11 @@ def _check_for_updates(ui, warning=True, force=False):
 
                     QFlatTooltipConfirm.information(
                         ui.menu_bar,
-                        message=("You have successfully updated the tool!<br><br>\nThese were the last changes:<br>\n{}".format(formated_changelog)),
+                        message=(
+                            "You have successfully updated the tool!<br><br>\nThese were the last changes:<br>\n{}".format(
+                                formated_changelog
+                            )
+                        ),
                         title="Installed %s %s" % (ui.TITLE, latest_version.replace("\n", "").replace("\r", "")),
                         icon=util.return_icon_path("success.svg"),
                     )

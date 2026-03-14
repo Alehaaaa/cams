@@ -91,11 +91,9 @@ except ImportError:
         QPen,
         QPolygonF,
         QGuiApplication,
-        QSize,
-        QRectF,
         QBrush,
     )
-    from PySide2.QtCore import Qt, QPointF, QPoint, QTimer, QSettings
+    from PySide2.QtCore import Qt, QPointF, QPoint, QTimer, QSettings, QSize, QRectF
 
 import aleha_tools
 from aleha_tools import base_widgets, util, widgets
@@ -388,7 +386,12 @@ class FloatingWidget(base_widgets.QFlatDialog):
         if self.frameGeometry().contains(cursor_pos):
             return True
 
-        if hasattr(self, "_active_popup") and self._active_popup and util.is_valid_widget(self._active_popup) and self._active_popup.isVisible():
+        if (
+            hasattr(self, "_active_popup")
+            and self._active_popup
+            and util.is_valid_widget(self._active_popup)
+            and self._active_popup.isVisible()
+        ):
             if self._active_popup.frameGeometry().contains(cursor_pos):
                 return True
         return False
@@ -1373,7 +1376,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         selection_layout.setContentsMargins(0, util.DPI(6), 0, util.DPI(8))
 
         selection_title = QLabel("Selection")
-        selection_title.setStyleSheet("font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR))
+        selection_title.setStyleSheet(
+            "font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR)
+        )
         selection_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         selection_title.setWordWrap(False)
         selection_title.setFixedHeight(selection_title.fontMetrics().height() + 2)
@@ -1829,7 +1834,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                     for target, xform in targets.items():
                         attr = target_attrs[target] if target_attrs else enum_attr
                         self.do_xform(target, attr, enum_value, xform)
-                    
+
                     cmds.progressBar(
                         gMainProgressBar,
                         edit=True,
@@ -1952,11 +1957,15 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.context_menu.aboutToShow.connect(self._suspend_auto_close)
         self.context_menu.aboutToHide.connect(self._resume_auto_close)
 
-        self.toggle_namespaces_action = self.context_menu.addAction("Show namespaces", description="Toggle namespace visibility in the viewport.")
+        self.toggle_namespaces_action = self.context_menu.addAction(
+            "Show namespaces", description="Toggle namespace visibility in the viewport."
+        )
         self.toggle_namespaces_action.setCheckable(True)
         self.toggle_namespaces_action.setChecked(self.namespace_display)
 
-        self.show_rotate_order_action = self.context_menu.addAction("Enable Rotate Order", description="Enable rotate order in the viewport.")
+        self.show_rotate_order_action = self.context_menu.addAction(
+            "Enable Rotate Order", description="Enable rotate order in the viewport."
+        )
         self.show_rotate_order_action.setCheckable(True)
         self.show_rotate_order_action.setChecked(self.show_rotate_order)
 

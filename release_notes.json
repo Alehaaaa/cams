@@ -1,5 +1,8 @@
 {
     "versions": {
+        "0.2.93-hotfix": [
+            "Fixed some SpaceSwitch imports."
+        ],
         "0.2.92-hotfix": [
             "Cams window refactor and inprovements.",
             "SpaceSwitch: bake can now be interrupted.",
@@ -158,32 +161,32 @@
             "Update shelf tab method."
         ],
         "0.2.04e": [
-            "Spaceswitch: RotateOrder always applied to all frames.",
-            "Spaceswitch: fix refresh method.",
+            "SpaceSwitch: RotateOrder always applied to all frames.",
+            "SpaceSwitch: fix refresh method.",
             "And more..."
         ],
         "0.2.04d": [
-            "Hotfix for Spaceswitch."
+            "Hotfix for SpaceSwitch."
         ],
         "0.2.04c": [
-            "Fixed Euler Filter for Spaceswitch.",
+            "Fixed Euler Filter for SpaceSwitch.",
             "Hotfix for Cams resizing."
         ],
         "0.2.04b": [
-            "Added best Rotate Order to Spaceswitch.",
+            "Added best Rotate Order to SpaceSwitch.",
             "Fixed issues and updates.",
             "And more..."
         ],
         "0.2.03b": [
             "Fixed PyQt version imports.",
-            "Spaceswitch: Settings saved.",
-            "Spaceswitch: auto-stop timer for auto-close.",
-            "Spaceswitch: frameless window popup.",
+            "SpaceSwitch: Settings saved.",
+            "SpaceSwitch: auto-stop timer for auto-close.",
+            "SpaceSwitch: frameless window popup.",
             "And more..."
         ],
         "0.2.03": [
             "Fixed imports",
-            "Updates for Spaceswitch",
+            "Updates for SpaceSwitch",
             "And more..."
         ],
         "0.2.02c": [

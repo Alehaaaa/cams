@@ -36,7 +36,6 @@ try:
         QIcon,
         QPainter,
         QKeyEvent,
-        QAction,
         QActionGroup,
     )
     from PySide6.QtCore import (  # type: ignore
@@ -51,7 +50,6 @@ except ImportError:
         QMainWindow,
         QLabel,
         QLayout,
-        QAction,
         QActionGroup,
         QDialog,
         QApplication,
@@ -490,7 +488,9 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             "Check for Updates",
             description="Check online to see if a newer version of Cams is available.",
         )
-        menu_general.addMenu(self._create_settings_menu(), description="Advanced system preferences, startup behaviors, and uninstallation.")
+        menu_general.addMenu(
+            self._create_settings_menu(), description="Advanced system preferences, startup behaviors, and uninstallation."
+        )
         self.about = menu_general.addAction(
             QIcon(util.return_icon_path("info")), "About", description="General information about Cams and the author."
         )
@@ -507,7 +507,9 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             description="Create a camera that smoothly follows the selected object's movements automatically.",
         )
         self.aimCam = menu_tools.addAction(
-            QIcon(util.return_icon_path("aim")), "Aim Cam", description="Create a camera with a dedicated aim target for precise and stable framing."
+            QIcon(util.return_icon_path("aim")),
+            "Aim Cam",
+            description="Create a camera with a dedicated aim target for precise and stable framing.",
         )
         menu_tools.addSeparator()
         self.multicams = menu_tools.addAction(
@@ -602,7 +604,9 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         )
         self.startup_run_Cams_checkbox.setCheckable(True)
         self.startup_run_Cams_checkbox.setChecked(self.startup_run_cams)
-        self.startup_run_Cams_checkbox.triggered.connect(lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state))
+        self.startup_run_Cams_checkbox.triggered.connect(
+            lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state)
+        )
 
         self.startup_Viewport_checkbox = system_menu.addAction(
             "Viewport on Startup", description="Apply saved display settings (like grids, curves) to viewports when opening a scene."
@@ -618,7 +622,9 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         )
         self.startup_HUD_checkbox.setCheckable(True)
         self.startup_HUD_checkbox.setChecked(self.startup_hud)
-        self.startup_HUD_checkbox.triggered.connect(lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state))
+        self.startup_HUD_checkbox.triggered.connect(
+            lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state)
+        )
 
         system_menu.addSeparator()
 
