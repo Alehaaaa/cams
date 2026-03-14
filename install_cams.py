@@ -1,3 +1,4 @@
+import os
 import ssl
 import json
 import shutil
@@ -6,7 +7,6 @@ import urllib.request
 import urllib.error
 import maya.cmds as cmds
 import maya.mel as mel
-from pathlib import Path
 
 # --- Constants ---
 REPO_OWNER = "Alehaaaa"
@@ -25,7 +25,7 @@ def download(url, save_path):
     try:
         response = urllib.request.urlopen(url, context=unverified_ssl_context, timeout=60)
     except Exception as e:
-        cmds.error(f"Failed to connect to {url}: {e}")
+        cmds.error("Failed to connect to {}: {}".format(url, e))
         return False
 
     if response is None:
@@ -48,7 +48,7 @@ def download(url, save_path):
             edit=True,
             beginProgress=True,
             isInterruptable=False,
-            status=f"Downloading {TOOL_NAME.title()}...",
+            status="Downloading {}...".format(TOOL_NAME.title()),
             maxValue=total_size,
         )
 
@@ -72,7 +72,7 @@ def download(url, save_path):
 
 def get_latest_sha():
     """Fetches the latest commit SHA from GitHub to bypass caching."""
-    api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/commits/main"
+    api_url = "https://api.github.com/repos/{0}/{1}/commits/main".format(REPO_OWNER, REPO_NAME)
     try:
         req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, context=unverified_ssl_context, timeout=10) as response:
@@ -107,18 +107,18 @@ def add_shelf_button():
 
     if not find_shelf_button(TOOL_NAME):
         # Determine icon path
-        scripts_dir = Path(cmds.internalVar(userScriptDir=True))
-        icon_path = scripts_dir / PACKAGE_NAME / "_icons" / f"{TOOL_NAME}.svg"
+        scripts_dir = cmds.internalVar(userScriptDir=True)
+        icon_path = os.path.join(scripts_dir, PACKAGE_NAME, "_icons", "{}.svg".format(TOOL_NAME))
 
         cmds.shelfButton(
             parent=current_shelf,
             image=str(icon_path),
             label=TOOL_NAME,
-            command=f"import {PACKAGE_NAME}.{TOOL_NAME} as {TOOL_NAME}; {TOOL_NAME}.show()",
-            annotation=f"{TOOL_NAME.title()} by Aleha",
+            command="import {0}.{1} as {1}; {1}.show()".format(PACKAGE_NAME, TOOL_NAME),
+            annotation="{0} by Aleha".format(TOOL_NAME.title()),
             imageOverlayLabel=TOOL_NAME[:4] if len(TOOL_NAME) > 4 else TOOL_NAME,
         )
-        print(f"Shelf button for {TOOL_NAME} created on '{current_shelf}'.")
+        print("Shelf button for {0} created on '{1}'.".format(TOOL_NAME, current_shelf))
 
 
 def install():
@@ -126,8 +126,8 @@ def install():
     # 0. Initial Prompt
     if not cmds.about(batch=True):
         confirm = cmds.confirmDialog(
-            title=f"Install {TOOL_NAME.title()}",
-            message=f"Do you want to install {TOOL_NAME.title()} by Aleha?",
+            title="Install {0}".format(TOOL_NAME.title()),
+            message="Do you want to install {0} by Aleha?".format(TOOL_NAME.title()),
             button=["Install", "Cancel"],
             defaultButton="Install",
             cancelButton="Cancel",
@@ -137,39 +137,40 @@ def install():
             print("Installation cancelled by user.")
             return False
 
-    print(f"--- Installing {TOOL_NAME.title()} ---")
+    print("--- Installing {0} ---".format(TOOL_NAME.title()))
 
     # Define paths
-    scripts_dir = Path(cmds.internalVar(userScriptDir=True))
-    tools_folder = scripts_dir / PACKAGE_NAME
-    tmp_zip = scripts_dir / "cams_install_tmp.zip"
+    scripts_dir = cmds.internalVar(userScriptDir=True)
+    tools_folder = os.path.join(scripts_dir, PACKAGE_NAME)
+    tmp_zip = os.path.join(scripts_dir, "cams_install_tmp.zip")
 
     # 1. Download
     sha = get_latest_sha()
-    download_url = f"https://github.com/Alehaaaa/camstool/archive/{sha}.zip"
+    download_url = "https://github.com/Alehaaaa/camstool/archive/{0}.zip".format(sha)
 
-    if tmp_zip.exists():
-        tmp_zip.unlink()
+    if os.path.exists(tmp_zip):
+        os.remove(tmp_zip)
 
     if not download(download_url, tmp_zip):
         return False
 
     # 2. Prepare target folder
-    if not tools_folder.exists():
-        tools_folder.mkdir(parents=True)
+    if not os.path.exists(tools_folder):
+        os.makedirs(tools_folder)
     else:
         # Clean up existing files except _prefs
-        print(f"Cleaning up {tools_folder}...")
-        for item in tools_folder.iterdir():
-            if item.name == "_prefs":
+        print("Cleaning up {0}...".format(tools_folder))
+        for item in os.listdir(tools_folder):
+            if item == "_prefs":
                 continue
+            item_path = os.path.join(tools_folder, item)
             try:
-                if item.is_file() or item.is_symlink():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item)
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.remove(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
             except Exception as e:
-                print(f"Warning: Could not remove {item}: {e}")
+                print("Warning: Could not remove {0}: {1}".format(item_path, e))
 
     # 3. Extract
     print("Extracting files...")
@@ -177,7 +178,7 @@ def install():
         with zipfile.ZipFile(tmp_zip, "r") as zip_ref:
             for member in zip_ref.namelist():
                 # zip structure: camstool-<sha>/source/aleha_tools/...
-                parts = Path(member).parts
+                parts = member.replace("\\", "/").split("/")
                 try:
                     # Find where 'aleha_tools' starts in the path
                     idx = parts.index(PACKAGE_NAME)
@@ -187,15 +188,16 @@ def install():
                     if not rel_parts:
                         continue  # Target the package dir itself
 
-                    target_path = tools_folder.joinpath(*rel_parts)
+                    target_path = os.path.join(tools_folder, *rel_parts)
 
                     if member.endswith("/") or member.endswith("\\"):
-                        if not target_path.exists():
-                            target_path.mkdir(parents=True)
+                        if not os.path.exists(target_path):
+                            os.makedirs(target_path)
                         continue
 
-                    if not target_path.parent.exists():
-                        target_path.parent.mkdir(parents=True)
+                    target_dir = os.path.dirname(target_path)
+                    if not os.path.exists(target_dir):
+                        os.makedirs(target_dir)
 
                     with open(target_path, "wb") as f:
                         f.write(zip_ref.read(member))
@@ -204,21 +206,21 @@ def install():
                     # 'aleha_tools' not in this path, skip it
                     continue
     except Exception as e:
-        cmds.error(f"Extraction failed: {e}")
+        cmds.error("Extraction failed: {0}".format(e))
         return False
     finally:
-        if tmp_zip.exists():
-            tmp_zip.unlink()
+        if os.path.exists(tmp_zip):
+            os.remove(tmp_zip)
 
     # 4. Finalize
     add_shelf_button()
 
     # Load the tool
-    cmds.evalDeferred(f"import {PACKAGE_NAME}.{TOOL_NAME} as {TOOL_NAME}; {TOOL_NAME}.show()", lowestPriority=True)
+    cmds.evalDeferred("import {0}.{1} as {1}; {1}.show()".format(PACKAGE_NAME, TOOL_NAME), lowestPriority=True)
 
     # Success Message
-    msg = f"{TOOL_NAME.title()} has been installed successfully!"
-    print(f"--- {TOOL_NAME.title()} Installation Complete ---")
+    msg = "{0} has been installed successfully!".format(TOOL_NAME.title())
+    print("--- {0} Installation Complete ---".format(TOOL_NAME.title()))
 
     # Try to use QFlatConfirmDialog if available
     try:
@@ -237,13 +239,13 @@ def install():
 
         from aleha_tools.base_widgets import QFlatConfirmDialog
 
-        icon_path = tools_folder / "_icons" / f"{TOOL_NAME}.svg"
+        icon_path = os.path.join(tools_folder, "_icons", "{0}.svg".format(TOOL_NAME))
 
         QFlatConfirmDialog.information(
             None, TOOL_NAME.title(), title="Installation Successful", message=msg, icon=str(icon_path), closeButton=True
         )
     except Exception as e:
-        print(f"Failed to show custom dialog: {e}")
+        print("Failed to show custom dialog: {0}".format(e))
         cmds.confirmDialog(title="Success", message=msg, button=["OK"])
 
     return True
@@ -264,7 +266,7 @@ def onMayaDroppedPythonFile(filePath, *args, **kwargs):
         try:
             importlib.reload(sys.modules[module_name])
         except Exception as e:
-            print(f"Warning: Could not reload installer module '{module_name}': {e}")
+            print("Warning: Could not reload installer module '{}': {}".format(module_name, e))
 
     install()
 

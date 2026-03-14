@@ -99,7 +99,8 @@ class followCam:
             main_attrs_to_lock = [i.rsplit(".", 1)[-1] for i in cmds.listAnimatable(main_grp)]
             for attr in main_attrs_to_lock:
                 cmds.setAttr(main_grp + "." + attr, e=True, keyable=False, lock=True)
-            icon_path = os.path.join(os.path.abspath(__file__ + "/../../"), "_icons", type_of_camera + ".png")
+            tools_folder = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+            icon_path = os.path.join(tools_folder, "_icons", type_of_camera + ".png")
             cmds.setAttr(main_grp + ".iconName", icon_path, type="string")
 
             cmds.parent(cam_grp, main_grp)

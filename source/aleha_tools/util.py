@@ -1,6 +1,6 @@
 import sys
 import re
-from pathlib import Path
+import os
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 
@@ -23,13 +23,12 @@ def DPI(val):
     return omui.MQtUtil.dpiScale(val)
 
 
-def return_icon_path(icon: str) -> str:
-    icon_path = Path(icon)
-    # Only add .png if there is no extension
-    if not icon_path.suffix:
-        icon_path = icon_path.with_suffix(".png")
+def return_icon_path(icon):
+    if not os.path.splitext(icon)[1]:
+        icon += ".png"
 
-    return str(Path(__file__).resolve().parent / "_icons" / icon_path.name)
+    icon_name = os.path.basename(icon)
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "_icons", icon_name)
 
 
 def make_inViewMessage(message, icon="camera"):
@@ -110,7 +109,7 @@ def check_visible_layout(layout):
 
 def get_root_path():
     """Returns the root path of the project (parent of source directory)."""
-    return Path(__file__).resolve().parents[2]
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
 def compare_versions(v1, v2):

@@ -1,3 +1,5 @@
+from __future__ import division
+
 try:
     from PySide6.QtWidgets import (  # type: ignore
         QWidget,
@@ -139,7 +141,7 @@ CONTEXTUAL_CURSOR = QCursor(QPixmap(":/rmbMenu.png"), hotX=11, hotY=8)
 
 class QFlatShelfPainter(QWidget):
     def __init__(self, parent=None):
-        super().__init__(parent)
+        QWidget.__init__(self, parent)
         self.tabbar_width = DPI(16)
         self.line_thickness = DPI(1)
         self.line_color = QColor(130, 130, 130)
@@ -203,7 +205,7 @@ class QFlatShelfPainter(QWidget):
 
 class QFlatMenuTitleAction(QWidgetAction):
     def __init__(self, version, parent=None):
-        super().__init__(parent)
+        QWidgetAction.__init__(self, parent)
         self.version = version
         self.website = DATA["AUTHOR"]["website"]
 
@@ -239,7 +241,7 @@ class QFlatMenuTitleAction(QWidgetAction):
 
 class QFlatMenu(QMenu):
     def __init__(self, title=None, parent=None):
-        super().__init__(title, parent) if title else super().__init__(parent)
+        QMenu.__init__(self, title, parent)
 
         if parent and hasattr(parent, "destroyed"):
             parent.destroyed.connect(self.close)
@@ -250,22 +252,22 @@ class QFlatMenu(QMenu):
 
     def addAction(self, *args, **kwargs):
         description = kwargs.pop("description", None)
-        action = super().addAction(*args, **kwargs)
+        action = QMenu.addAction(self, *args, **kwargs)
         if description:
             action.setProperty("description", description)
             title = action.text().replace("&", "").strip()
-            action.setStatusTip(f"{title} - {description}")
+            action.setStatusTip("{} - {}".format(title, description))
         return action
 
     def addMenu(self, *args, **kwargs):
         description = kwargs.pop("description", None)
-        item = super().addMenu(*args, **kwargs)
+        item = QMenu.addMenu(self, *args, **kwargs)
         if description:
             # item can be QMenu or QAction depending on the overload
             action = item.menuAction() if hasattr(item, "menuAction") else item
             action.setProperty("description", description)
             title = action.text().replace("&", "").strip()
-            action.setStatusTip(f"{title} - {description}")
+            action.setStatusTip("{} - {}".format(title, description))
         return item
 
     def _on_action_hovered(self, action):
@@ -281,7 +283,7 @@ class QFlatMenu(QMenu):
         desc = action.property("description")
         if desc:
             title = action.text().replace("&", "").strip()
-            template = f"<title>{title}</title><text>{desc}</text>"
+            template = "<title>{}</title><text>{}</text>".format(title, desc)
 
             geometry = self.actionGeometry(action)
             target_rect = QRect(self.mapToGlobal(geometry.topLeft()), geometry.size())
@@ -294,13 +296,13 @@ class QFlatMenu(QMenu):
     def hideEvent(self, event):
         self._last_hovered_action = None
         QFlatTooltipManager.hide()
-        super().hideEvent(event)
+        QMenu.hideEvent(self, event)
 
     def leaveEvent(self, event):
         self._last_hovered_action = None
 
         QFlatTooltipManager.cancel_timer()
-        super().leaveEvent(event)
+        QMenu.leaveEvent(self, event)
 
     def _on_action_triggered(self, action):
         if isinstance(action, QWidgetAction):
@@ -309,22 +311,25 @@ class QFlatMenu(QMenu):
 
 class QFlatOpenMenu(QFlatMenu):
     def __init__(self, title=None, parent=None):
-        super().__init__(title, parent) if title else super().__init__(parent)
+        if title:
+            QFlatMenu.__init__(self, title, parent)
+        else:
+            QFlatMenu.__init__(self, parent)
 
     def mouseReleaseEvent(self, e):
         action = self.actionAt(e.pos())
         if action and action.isEnabled():
             if action.isCheckable():
                 action.setEnabled(False)
-                super().mouseReleaseEvent(e)
+                QFlatMenu.mouseReleaseEvent(self, e)
                 action.setEnabled(True)
                 action.trigger()
             elif action.data() == "keep_open":
                 action.trigger()
             else:
-                super().mouseReleaseEvent(e)
+                QFlatMenu.mouseReleaseEvent(self, e)
         else:
-            super().mouseReleaseEvent(e)
+            QFlatMenu.mouseReleaseEvent(self, e)
 
 
 # QLineEdit that doesn't trigger next action
@@ -335,7 +340,7 @@ class QFlatRenameEdit(QLineEdit):
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
             self.returnPressed.emit()
             return
-        super().keyPressEvent(event)
+        QLineEdit.keyPressEvent(self, event)
 
 
 # QPushButton hover detection
@@ -366,7 +371,7 @@ class QFlatCamButton(QPushButton):
         return self._camera
 
     def __init__(self, camera, ui=None, width=True):
-        super().__init__()
+        QPushButton.__init__(self)
         # Variables
         self._camera = camera
         self._parentUI = ui
@@ -662,13 +667,13 @@ class QFlatCamButton(QPushButton):
             menu.addSeparator()
 
             # Create section header
-            section_action = menu.addAction(section_name, description=f"Toggle visibility for all {section_name}.")
+            section_action = menu.addAction(section_name, description="Toggle visibility for all {}.".format(section_name))
             section_action.setCheckable(True)
 
             # Group children data for sync logic
             element_data = []
             for label, attr, is_plugin in elements:
-                action = menu.addAction(f"     {label}", description=f"Toggle visibility for {label.strip()}.")
+                action = menu.addAction("     {}".format(label), description="Toggle visibility for {}.".format(label.strip()))
                 action.setCheckable(True)
 
                 # Set initial state from scene or preferences
@@ -736,7 +741,7 @@ class QFlatCamButton(QPushButton):
             self._set_background_color("dark")
         elif event.button() == Qt.RightButton:
             self._set_background_color("dark")
-        super().mousePressEvent(event)
+        QPushButton.mousePressEvent(self, event)
 
     def mouseReleaseEvent(self, event):
         is_dots_click = False
@@ -761,7 +766,7 @@ class QFlatCamButton(QPushButton):
             self._set_background_color("base")
             self.setIcon(self.icons["default"])
 
-        super().mouseReleaseEvent(event)
+        QPushButton.mouseReleaseEvent(self, event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -805,8 +810,10 @@ class QFlatCamButton(QPushButton):
         if event.type() == QEvent.Enter:
             if not self._renaming_active:
                 icon_path = return_icon_path(self.cam_type)
-                cam_name = "Maya Camera" if self.cam_type == "camera" else f"{self.cam_type.capitalize()} Camera"
-                desc = f"Manage this {cam_name}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports."
+                cam_name = "Maya Camera" if self.cam_type == "camera" else "{} Camera".format(self.cam_type.capitalize())
+                desc = "Manage this {}. Use modifier keys for shortcuts, Right-Click for the context menu, or Drag & Drop to reorder and assign to viewports.".format(
+                    cam_name
+                )
                 QFlatTooltipManager.delayed_show(
                     delay=800, text=self._camera, anchor_widget=self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc
                 )
@@ -819,7 +826,7 @@ class QFlatCamButton(QPushButton):
             self.setIcon(self.icons["default"])
             self._set_background_color("base")
 
-        return super().eventFilter(obj, event)
+        return QPushButton.eventFilter(self, obj, event)
 
     # UI Utilities ############################################################
     def _truncated_name(self, length=18):
@@ -1010,7 +1017,7 @@ class QFlatCamButton(QPushButton):
                 for name, channel in mute_channels:
                     mute_channel_attr = "%s.%s" % (camera_grp, channel)
 
-                    action = mute_menu.addAction(name, description=f"Toggle tracking for the {name} channel.")
+                    action = mute_menu.addAction(name, description="Toggle tracking for the {} channel.".format(name))
                     action.setCheckable(True)
                     action.setChecked(not cmds.mute(mute_channel_attr, q=True))
                     action.triggered.connect(partial(self._mute_follow_channel, action, mute_channel_attr))
@@ -1128,7 +1135,7 @@ class QFlatCamButton(QPushButton):
 
 class QFlatScrollArea(QScrollArea):
     def __init__(self, height, parent=None):
-        super().__init__(parent)
+        QScrollArea.__init__(self, parent)
 
         self.setFrameStyle(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1149,7 +1156,7 @@ class QFlatScrollArea(QScrollArea):
             delta = event.angleDelta().y() / 120  # Normalizing delta
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - (delta * 30))
             event.accept()
-        super().wheelEvent(event)
+        QScrollArea.wheelEvent(self, event)
 
 
 # CAMERA ATTRIBUTES DIALOG #################################################
@@ -1170,7 +1177,7 @@ class QFlatAttributesDialog(QFlatDialog):
         cls.dlg_instance.show()
 
     def __init__(self, cam, parent=None):
-        super().__init__(parent)
+        QFlatDialog.__init__(self, parent)
 
         self.cam = cam
 
@@ -1494,8 +1501,7 @@ class QFlatSettingsDialog(QFlatDialog):
         cls.dlg_instance.show()
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-
+        QFlatDialog.__init__(self, parent)
         self._parentUI = parent
 
         self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
@@ -1728,7 +1734,7 @@ class QFlatAboutDialog(QFlatDialog):
         return cls.dlg_instance
 
     def __init__(self, parent=None, data=None):
-        super().__init__(parent)
+        QFlatDialog.__init__(self, parent)
 
         self._parentUI = parent
         self._data = data

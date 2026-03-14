@@ -120,18 +120,18 @@ def show():
     except Exception:
         pass
 
-    cams_aleha_tool = QFlatCamsWindow()
+    cams_aleha_tool = QCamsWindow()
     cams_aleha_tool.showWindow()
 
 
-class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
+class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
     keys_pressed_changed = Signal(dict)
 
     def __init__(self, parent=None):
         self.TITLE = TITLE
         self.VERSION = VERSION
 
-        super().__init__(parent=parent)
+        super(QCamsWindow, self).__init__(parent=parent)
 
         self.setWindowTitle(self.TITLE)
         self.setObjectName(self.TITLE)
@@ -141,7 +141,6 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
             self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
 
-        self.workspace_control_name = self.objectName() + "WorkspaceControl"
         self.all_created_scriptjobs = []
         self.all_displayed_buttons = {}
 
@@ -217,17 +216,14 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
                 self._in_update_keys_pressed = True  # Set the flag to True before updating
                 self.keys_pressed = updated_keys
 
-        if util.get_python_version() > 2:
-            return super().eventFilter(obj, event)
-        else:
-            return super().eventFilter(obj, event)
+        return QDialog.eventFilter(self, obj, event)
 
     def visible_change_command(self, *args):
-        if not cmds.workspaceControl(self.workspace_control_name, ex=True):
+        if not self.isDockable():
             return
         if self.current_layout != cmds.workspaceLayoutManager(q=1, current=True):
             self.current_layout = cmds.workspaceLayoutManager(q=1, current=True)
-            if not cmds.workspaceControl(self.workspace_control_name, q=True, visible=True):
+            if not self.isVisible():
                 cmds.evalDeferred(show, lowestPriority=True)
 
                 if self.shelf_painter:
@@ -236,15 +232,16 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
                     cmds.evalDeferred(self.shelf_tabbar, lowestPriority=True)
                 return
 
-        if not cmds.workspaceControl(self.workspace_control_name, q=True, floating=True):
-            if cmds.workspaceControl(self.workspace_control_name, q=True, collapse=True):
+        if not self.isFloating():
+            workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
+            if cmds.workspaceControl(workspace_control, q=True, collapse=True):
                 timer = QTimer(self)
                 timer.setSingleShot(True)
 
                 timer.timeout.connect(
                     partial(
                         cmds.workspaceControl,
-                        self.workspace_control_name,
+                        workspace_control,
                         e=True,
                         collapse=False,
                         tp=["west", 0],
@@ -265,22 +262,20 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
             if self.shelf_painter:
                 self.shelf_painter.hide()
-            # cmds.workspaceControl(self.workspace_control_name, e=True, actLikeMayaUIElement=True)
 
     def showWindow(self, dock=True):
         funcs.close_all_Windows()
 
-        self.show(dockable=True, retain=False)  # , actLikeMayaUIElement=True
+        self.show(dockable=True, retain=False)
 
         if dock:
             self.dock_ui_btn.setHidden(True)
-            is_floating = cmds.workspaceControl(self.workspace_control_name, q=True, floating=True)
+            is_floating = self.isFloating()
 
             # Build up kwargs for the workspaceControl command
             kwargs = {
                 "e": True,
                 "visibleChangeCommand": self.visible_change_command,
-                # "actLikeMayaUIElement": True,
             }
 
             # If it's floating and the referenced layout isn't visible, reset the position
@@ -294,7 +289,8 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
                 kwargs["rsw"] = util.DPI(50)
 
             # Make the workspaceControl call just once
-            cmds.workspaceControl(self.workspace_control_name, **kwargs)
+            workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
+            cmds.workspaceControl(workspace_control, **kwargs)
 
             # cmds.evalDeferred(self.shelf_tabbar, lowestPriority=True)
 
@@ -313,14 +309,15 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
         except Exception:
             pass
 
-        qctrl = omui.MQtUtil.findControl(self.workspace_control_name)
+        workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
+        qctrl = omui.MQtUtil.findControl(workspace_control)
         control = util.get_maya_qt(qctrl)
         try:
             tab_handle = control.parent().parent()
         except Exception:
             return
 
-        if cmds.workspaceControl(self.workspace_control_name, q=True, floating=True):
+        if self.isFloating():
             tab_handle.tabBar().setVisible(False)
             return
 
@@ -915,7 +912,8 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
             docked = False
 
         # Make the workspaceControl call just once
-        cmds.workspaceControl(self.workspace_control_name, **kwargs)
+        workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
+        cmds.workspaceControl(workspace_control, **kwargs)
 
         return docked
 
@@ -1140,12 +1138,13 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
     def resizeEvent(self, event):
         def get_qt():
-            cams_widget = omui.MQtUtil.findControl(self.workspace_control_name)
+            workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
+            cams_widget = omui.MQtUtil.findControl(workspace_control)
             if not cams_widget:
                 return
             return util.get_maya_qt(cams_widget, QWidget)
 
-        if cmds.workspaceControl(self.workspace_control_name, q=True, floating=True):
+        if self.isFloating():
             topmost_parent = []
             cams_ui = get_qt()
             if not cams_ui:
@@ -1253,6 +1252,3 @@ class QFlatCamsWindow(MayaQWidgetDockableMixin, QDialog):
     def dockCloseEventTriggered(self):
         funcs.close_all_Windows(self.objectName())
         self.kill_all_scriptJobs()
-
-
-UI = QFlatCamsWindow

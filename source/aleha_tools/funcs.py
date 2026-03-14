@@ -1,7 +1,9 @@
+from __future__ import division
 import maya.cmds as cmds
 import maya.mel as mel
 import importlib
 import shutil
+import sys
 import os
 
 import maya.OpenMayaUI as omui
@@ -82,11 +84,11 @@ def install_userSetup(uninstall=False):
 
     run_script = "import aleha_tools.cams as cams; cams.show()"
     cams_run_code = (
-        f"{startCode}\n\n"
-        f"{cmds_import}"
-        f"if not cmds.about(batch=True):\n"
-        f'    cmds.evalDeferred(lambda: cmds.evalDeferred("{run_script}", lowestPriority=True))\n\n'
-        f"{endCode}"
+        "{}\n\n".format(startCode) +
+        "{0}".format(cmds_import) +
+        "if not cmds.about(batch=True):\n" +
+        '    cmds.evalDeferred(lambda: cmds.evalDeferred("{}", lowestPriority=True))\n\n'.format(run_script) +
+        "{}".format(endCode)
     )
 
     if not uninstall:
@@ -577,15 +579,22 @@ def check_author():
 
 
 def _load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, str(path))
-    if not spec:
-        raise ImportError("No module at '%s'" % path)
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as e:
-        raise ImportError("Error in '%s': %s" % (path, e))
-    return module
+    if sys.version_info[0] > 2:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        if not spec:
+            raise ImportError("No module at '%s'" % path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as e:
+            raise ImportError("Error in '%s': %s" % (path, e))
+        return module
+    else:
+        import imp
+
+        return imp.load_source(name, str(path))
 
 
 def _run_method(module, cls_name, method="main", *args):
@@ -624,13 +633,14 @@ def compile_version():
             cmds.warning("New version must be greater or equal to current version.")
             return
 
-        path = get_root_path() / "development" / "UpdateCompiler.py"
+        root = get_root_path()
+        path = os.path.join(root, "development", "UpdateCompiler.py")
         name = "compiler_cams"
         cls = "CompileCams"
         method = "main"
 
-        destination_path = get_root_path()
-        source_path = destination_path / "source" / "aleha_tools"
+        destination_path = root
+        source_path = os.path.join(destination_path, "source", "aleha_tools")
 
         try:
             # Pass source_path, destination_path, new_version as positional arguments
@@ -661,12 +671,13 @@ def changes_compiler():
     importlib.reload(aleha_tools)
     local_version = aleha_tools.DATA.get("VERSION")
 
-    path = get_root_path() / "development" / "ChangesCompiler.py"
+    root = get_root_path()
+    path = os.path.join(root, "development", "ChangesCompiler.py")
     name = "generate_changes_cams"
     cls = "CamsToolUpdater"
     method = "run"
 
-    script_path = get_root_path() / "source" / "aleha_tools"
+    script_path = os.path.join(root, "source", "aleha_tools")
     try:
         changelog = _run_method(_load_module(path, name), cls, method, script_path, local_version)
         if changelog:

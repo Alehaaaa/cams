@@ -44,7 +44,8 @@ class DebugManager:
         self.ui = ui
 
     def _get_cams_widget(self):
-        ptr = omui.MQtUtil.findControl(self.ui.workspace_control_name)
+        workspace_control = self.ui.parent().objectName() if self.ui.parent() else self.ui.objectName() + "WorkspaceControl"
+        ptr = omui.MQtUtil.findControl(workspace_control)
         if ptr:
             return util.get_maya_qt(ptr, QWidget)
         return None
@@ -61,7 +62,8 @@ class DebugManager:
             valid = util.is_valid_widget(btn)
             print("  - %s: %s (Valid: %s)" % (cam, btn, valid))
 
-        print("Workspace Control: %s" % self.ui.workspace_control_name)
+        workspace_control = self.ui.parent().objectName() if self.ui.parent() else self.ui.objectName() + "WorkspaceControl"
+        print("Workspace Control: %s" % workspace_control)
         print("------------------------------\n")
 
     @tool("Debug UI Parentage", category="UI")

@@ -21,7 +21,8 @@ class CompileCams:
             cams_version: Version string. If None, it will be read from aleha_tools.
         """
         # Determine destination first as other paths depend on it
-        self.destination = Path(destination) if destination else Path(__file__).resolve().parents[1]
+        import os
+        self.destination = Path(destination) if destination else Path(os.path.realpath(__file__)).parents[1]
         self.source_path = Path(source_path) if source_path else self.destination / "source" / "aleha_tools"
 
         if not cams_version:
@@ -82,6 +83,7 @@ class CompileCams:
         if not all_notes:
 
             def _load_module(path, name):
+                path = Path(path).resolve()
                 spec = importlib.util.spec_from_file_location(name, str(path))
                 if not spec:
                     raise ImportError("No module at '%s'" % path)
@@ -102,7 +104,7 @@ class CompileCams:
                     raise AttributeError("No callable method '%s' in '%s'" % (method, cls_name))
                 return getattr(instance, method)()
 
-            path = Path(__file__).parent / "ChangesCompiler.py"
+            path = Path(__file__).resolve().parent / "ChangesCompiler.py"
             name = "generate_changes_cams"
             cls = "CamsToolUpdater"
             method = "run"

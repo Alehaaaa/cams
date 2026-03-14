@@ -1,3 +1,4 @@
+from __future__ import division
 import maya.cmds as cmds
 import maya.OpenMayaUI as omui
 import os
@@ -230,7 +231,7 @@ class HUDWindow(QFlatDialog):
             cls.dlg_instance.activateWindow()
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        QFlatDialog.__init__(self, parent)
         self.setWindowTitle("HUD Editor")
         self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
 

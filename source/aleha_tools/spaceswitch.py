@@ -1,3 +1,4 @@
+from __future__ import division
 # -*- coding: utf-8 -*-
 
 #
@@ -32,15 +33,69 @@ from maya import OpenMaya as om
 from maya import OpenMayaUI as omui
 
 try:
-    PYSIDE_VERSION = 2
-    from PySide2.QtCore import *  # noqa: F403
-    from PySide2.QtGui import *  # noqa: F403
-    from PySide2.QtWidgets import *  # noqa: F403
-except ImportError:
     PYSIDE_VERSION = 6
-    from PySide6.QtCore import *  # noqa: F403
-    from PySide6.QtGui import *  # noqa: F403
-    from PySide6.QtWidgets import *  # noqa: F403
+    from PySide6.QtWidgets import (  # type: ignore
+        QWidget,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QFrame,
+        QVBoxLayout,
+        QSizePolicy,
+        QSizeGrip,
+        QListWidget,
+        QListWidgetItem,
+        QGraphicsOpacityEffect,
+    )
+    from PySide6.QtGui import (  # type: ignore
+        QIcon,
+        QPainter,
+        QColor,
+        QCursor,
+        QPixmap,
+        QPen,
+        QPolygonF,
+        QGuiApplication,
+        QBrush,
+    )
+    from PySide6.QtCore import (  # type: ignore
+        Qt,
+        QPointF,
+        QPoint,
+        QTimer,
+        QSettings,
+        QSize,
+        QRectF,
+    )
+except ImportError:
+    PYSIDE_VERSION = 2
+    from PySide2.QtWidgets import (
+        QWidget,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QFrame,
+        QVBoxLayout,
+        QSizePolicy,
+        QSizeGrip,
+        QListWidget,
+        QListWidgetItem,
+        QGraphicsOpacityEffect,
+    )
+    from PySide2.QtGui import (
+        QIcon,
+        QPainter,
+        QColor,
+        QCursor,
+        QPixmap,
+        QPen,
+        QPolygonF,
+        QGuiApplication,
+        QSize,
+        QRectF,
+        QBrush,
+    )
+    from PySide2.QtCore import Qt, QPointF, QPoint, QTimer, QSettings
 
 import aleha_tools
 from aleha_tools import base_widgets, util, widgets
@@ -246,17 +301,17 @@ class Grip(QSizeGrip):
     """
 
     def __init__(self, parent):
-        super().__init__(parent)
+        QSizeGrip.__init__(self, parent)
         self._parent_widget = parent
         self._start_geom = None
 
     def mousePressEvent(self, e):
         self._start_geom = self._parent_widget.geometry()
         self._parent_widget._suspend_auto_close()
-        super().mousePressEvent(e)
+        QSizeGrip.mousePressEvent(self, e)
 
     def mouseReleaseEvent(self, e):
-        super().mouseReleaseEvent(e)
+        QSizeGrip.mouseReleaseEvent(self, e)
         if self._start_geom and self._parent_widget.geometry() != self._start_geom:
             self._parent_widget.showBottomBar()
         self._start_geom = None
@@ -277,7 +332,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
     TEXT_COLOR = COLOR_TEXT_SECONDARY
 
     def __init__(self, popup=False, parent=None):
-        super().__init__(parent)
+        base_widgets.QFlatDialog.__init__(self, parent)
         self.setWindowFlags(self.windowFlags() | Qt.Tool | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
@@ -299,12 +354,12 @@ class FloatingWidget(base_widgets.QFlatDialog):
 
     def enterEvent(self, event):
         self._auto_close_timer.stop()
-        super().enterEvent(event)
+        base_widgets.QFlatDialog.enterEvent(self, event)
 
     def leaveEvent(self, event):
         if self._auto_close_active:
             self._auto_close_timer.start()
-        super().leaveEvent(event)
+        base_widgets.QFlatDialog.leaveEvent(self, event)
 
     def _process_auto_close_request(self):
         """Evaluates whether the window should close based on current cursor position."""
@@ -370,7 +425,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
             self.bottomBar = None
 
         kwargs.setdefault("margins", 0)
-        super().setBottomBar(*args, **kwargs)
+        base_widgets.QFlatDialog.setBottomBar(self, *args, **kwargs)
 
     def showBottomBar(self):
         """Disables auto-kill and adds a default close button if no bar exists."""
@@ -399,7 +454,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
         self.grip.setFixedSize(s)
         self.grip.move(self.width() - s.width(), 0)
         self.grip.raise_()
-        super().resizeEvent(event)
+        base_widgets.QFlatDialog.resizeEvent(self, event)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -411,7 +466,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
             self._drag_start_pos = global_position
             self._drag_offset = global_position - self.frameGeometry().topLeft()
             self._suspend_auto_close()
-        super().mousePressEvent(e)
+        base_widgets.QFlatDialog.mousePressEvent(self, e)
 
     def mouseMoveEvent(self, e):
         if self._is_dragging and (e.buttons() & Qt.LeftButton):
@@ -420,7 +475,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
             else:
                 global_position = e.globalPosition().toPoint()
             self.move(global_position - self._drag_offset)
-        super().mouseMoveEvent(e)
+        base_widgets.QFlatDialog.mouseMoveEvent(self, e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton and self._is_dragging:
@@ -439,7 +494,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
                 self._auto_close_active = True
                 self._resume_auto_close()
 
-        super().mouseReleaseEvent(e)
+        base_widgets.QFlatDialog.mouseReleaseEvent(self, e)
 
     def _resume_auto_close(self):
         """Restarts the auto-close timer if the cursor is currently outside the bounds."""
@@ -461,7 +516,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
 
     def closeEvent(self, e):
         self._disable_auto_close()
-        super().closeEvent(e)
+        base_widgets.QFlatDialog.closeEvent(self, e)
 
 
 # =================================================================================
@@ -481,7 +536,7 @@ class PillSlider(QWidget):
     SNAP_THRESHOLD = 0.06
 
     def __init__(self, value, min_val, max_val, callback, parent=None):
-        super().__init__(parent)
+        QWidget.__init__(self, parent)
         self.setFixedSize(util.DPI(140), self.HEIGHT)
         self.value = float(value)
         self.min_val = float(min_val)
@@ -567,7 +622,7 @@ class AttributePopup(QWidget):
     CURRENT_KEYFRAMES = "Current Keyframes"
 
     def __init__(self, item_widget, on_select):
-        super().__init__(item_widget.window())
+        QWidget.__init__(self, item_widget.window())
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -591,12 +646,14 @@ class AttributePopup(QWidget):
         """Main entry point for UI construction."""
         self.main_frame = QFrame(self)
         self.main_frame.setObjectName("PopupFrame")
-        self.main_frame.setStyleSheet(f"""
+        self.main_frame.setStyleSheet(
+            """
             QFrame#PopupFrame {{
-                background-color: {COLOR_BG_POPUP};
-                border-radius: {util.DPI(8)}px;
+                background-color: {};
+                border-radius: {}px;
             }}
-        """)
+        """.format(COLOR_BG_POPUP, util.DPI(8))
+        )
 
         self.content_layout = QVBoxLayout(self.main_frame)
         self.content_layout.setContentsMargins(util.DPI(20), util.DPI(10), util.DPI(18), util.DPI(16))
@@ -641,7 +698,7 @@ class AttributePopup(QWidget):
                 info = self.item_widget.gimbal_info.get(opt, {})
                 label = info.get("label", "")
                 if label:
-                    display_text = f"{opt} ({label})"
+                    display_text = "{} ({})".format(opt, label)
 
             btn = self._create_option_button(display_text, i, is_all)
             self.content_layout.addWidget(btn)
@@ -654,14 +711,14 @@ class AttributePopup(QWidget):
         title = QLabel(text)
         title.setContentsMargins(0, 0, 0, util.DPI(4))
         title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        title.setStyleSheet(f"color: {COLOR_TEXT_SECONDARY}; font-size: {util.DPI(11)}px;")
+        title.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_TEXT_SECONDARY, util.DPI(11)))
         return title
 
     def _add_separator(self):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
         line.setFixedHeight(1)
-        line.setStyleSheet(f"background-color: {COLOR_BG_TRACK};")
+        line.setStyleSheet("background-color: {};".format(COLOR_BG_TRACK))
         self.content_layout.addSpacing(util.DPI(10))
         self.content_layout.addWidget(line)
         self.content_layout.addSpacing(util.DPI(10))
@@ -683,22 +740,24 @@ class AttributePopup(QWidget):
         btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
 
         # Style with design tokens
-        btn.setStyleSheet(f"""
+        btn.setStyleSheet(
+            """
             QPushButton {{
-                color: {COLOR_ACCENT_HOVER};
-                background-color: {COLOR_ACCENT_DARK};
+                color: {0};
+                background-color: {1};
                 text-align: left;
-                padding: {util.DPI(8)}px {util.DPI(18)}px {util.DPI(8)}px {util.DPI(8)}px;
-                border-radius: {util.DPI(6)}px;
-                font-size: {util.DPI(11)}px;
+                padding: {2}px {3}px {2}px {2}px;
+                border-radius: {4}px;
+                font-size: {5}px;
                 font-weight: bold;
                 border: none;
             }}
             QPushButton:hover {{
-                background-color: {COLOR_ACCENT_MAIN};
-                color: {COLOR_ACCENT_DARK};
+                background-color: {6};
+                color: {1};
             }}
-        """)
+        """.format(COLOR_ACCENT_HOVER, COLOR_ACCENT_DARK, util.DPI(8), util.DPI(18), util.DPI(6), util.DPI(11), COLOR_ACCENT_MAIN)
+        )
 
         # Sync indicator dot
         dot_layout = QHBoxLayout(btn)
@@ -714,9 +773,9 @@ class AttributePopup(QWidget):
         is_current = index in self.current_indices
 
         if is_current:
-            dot.setStyleSheet(f"background: {COLOR_BG_TRACK}; border-radius: {dot_size // 2}px;")
+            dot.setStyleSheet("background: {}; border-radius: {}px;".format(COLOR_BG_TRACK, dot_size // 2))
         elif is_keyed:
-            dot.setStyleSheet(f"background: {COLOR_BLEND_MULTI}; border-radius: {dot_size // 2}px;")
+            dot.setStyleSheet("background: {}; border-radius: {}px;".format(COLOR_BLEND_MULTI, dot_size // 2))
         else:
             dot.setStyleSheet("background: transparent;")
 
@@ -767,14 +826,14 @@ class AttributePopup(QWidget):
         p = self.parent()
         if p and hasattr(p, "_update_interaction_state"):
             p._update_interaction_state(True)
-        super().enterEvent(event)
+        QWidget.enterEvent(self, event)
 
     def leaveEvent(self, event):
         p = self.parent()
         if p and hasattr(p, "_update_interaction_state"):
             # Delay to check if focus moved back to main area
             QTimer.singleShot(150, lambda: p._update_interaction_state(False))
-        super().leaveEvent(event)
+        QWidget.leaveEvent(self, event)
 
     def closeEvent(self, event):
         p = self.parent()
@@ -784,7 +843,7 @@ class AttributePopup(QWidget):
                 p._active_popup = None
             if hasattr(p, "_resume_auto_close"):
                 p._resume_auto_close()
-        super().closeEvent(event)
+        QWidget.closeEvent(self, event)
 
     def show_beside(self, widget):
         self.adjustSize()
@@ -835,7 +894,7 @@ class AttributeItem(QWidget):
     """
 
     def __init__(self, label_text, enum_attr, unique_controls, objects_map, parent_dialog):
-        super().__init__(parent_dialog.mainContent)
+        QWidget.__init__(self, parent_dialog.mainContent)
         self.label_text = label_text
         self.enum_attr = enum_attr
         self.unique_controls = unique_controls
@@ -867,7 +926,7 @@ class AttributeItem(QWidget):
         self.main_layout.setSpacing(util.DPI(6))
 
         self.name_label = QLabel(self.label_text, self)
-        self.name_label.setStyleSheet(f"color: {COLOR_TEXT_MAIN}; font-size: {util.DPI(11)}px;")
+        self.name_label.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_TEXT_MAIN, util.DPI(11)))
         self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         self.pill_container = QWidget(self)
@@ -883,9 +942,9 @@ class AttributeItem(QWidget):
         self.sq_btn.setAttribute(Qt.WA_TransparentForMouseEvents)
 
         self.val_label = QLabel(
-            self.options[int(self.current_idx)] if self.is_enum and self.options else f"{self.current_idx:.2f}", self.pill_container
+            self.options[int(self.current_idx)] if self.is_enum and self.options else "{:.2f}".format(self.current_idx), self.pill_container
         )
-        self.val_label.setStyleSheet(f"color: {COLOR_ACCENT_LIGHT}; font-size: {util.DPI(11)}px;")
+        self.val_label.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_ACCENT_LIGHT, util.DPI(11)))
         self.val_label.setAlignment(Qt.AlignCenter)
 
         # Toggles hide text until hover; Enums show text always; Numeric hide always
@@ -969,12 +1028,12 @@ class AttributeItem(QWidget):
             else:
                 # Basic dot fallback if SVG fails to load
                 self.sq_btn.setIcon(QIcon())
-                self.sq_btn.setStyleSheet(f"background: {ball_color}; border-radius: {int(util.DPI(6))}px; border: none;")
+                self.sq_btn.setStyleSheet("background: {}; border-radius: {}px; border: none;".format(ball_color, int(util.DPI(6))))
         else:
             self.sq_btn.setIcon(QIcon())
-            self.sq_btn.setStyleSheet(f"background: {ball_color}; border-radius: {int(util.DPI(6))}px; border: none;")
+            self.sq_btn.setStyleSheet("background: {}; border-radius: {}px; border: none;".format(ball_color, int(util.DPI(6))))
 
-        self.pill_container.setStyleSheet(f"background: {pill_bg}; border-radius: {util.DPI(8)}px;")
+        self.pill_container.setStyleSheet("background: {}; border-radius: {}px;".format(pill_bg, util.DPI(8)))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -998,14 +1057,14 @@ class AttributeItem(QWidget):
             # Ensure parent interaction state is active when a row is hovered
             if hasattr(self.parent_dialog, "_update_interaction_state"):
                 self.parent_dialog._update_interaction_state(True)
-        super().enterEvent(event)
+        QWidget.enterEvent(self, event)
 
     def leaveEvent(self, event):
         self._hover_active = False
         self.update()
         if self.parent_dialog:
             self.parent_dialog._handle_attr_leave(self)
-        super().leaveEvent(event)
+        QWidget.leaveEvent(self, event)
 
     def on_select(self, idx, all_frames=None):
         self.current_idx = idx
@@ -1050,7 +1109,7 @@ class AttributeItem(QWidget):
 
 class SetupTargetsDialog(FloatingWidget):
     def __init__(self, parent, objects_dict, on_close):
-        super().__init__(popup=False, parent=parent)
+        FloatingWidget.__init__(self, popup=False, parent=parent)
         self.on_close = on_close
 
         if parent and hasattr(parent, "_suspend_auto_close"):
@@ -1099,12 +1158,12 @@ class SetupTargetsDialog(FloatingWidget):
         if parent and hasattr(parent, "_resume_auto_close"):
             parent._resume_auto_close()
 
-        super().closeEvent(event)
+        FloatingWidget.closeEvent(self, event)
 
 
 class TargetItemWidget(QWidget):
     def __init__(self, name, list_ref):
-        super().__init__()
+        QWidget.__init__(self)
         self.name = name
         self.list_ref = list_ref
 
@@ -1142,7 +1201,7 @@ class TargetItemWidget(QWidget):
 
 class TargetsList(QListWidget):
     def __init__(self, parent=None):
-        super().__init__(parent)
+        QListWidget.__init__(self, parent)
         self.backing_store = []
         self.setStyleSheet("""
             QListWidget:focus {
@@ -1187,7 +1246,7 @@ class Timeline(QWidget):
         parent = parent or self.get_timeline()
         if not parent:
             return
-        super().__init__(parent)
+        QWidget.__init__(self, parent)
 
         self.timerange = timerange or [int(f) for f in cmds.timeControl("timeControl1", ra=1, q=True)]
         if not self.timerange:
@@ -1262,7 +1321,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def __init__(self, popup=False, parent=None):
         parent = parent or util.get_maya_qt()
-        super().__init__(popup=popup, parent=parent)
+        FloatingWidget.__init__(self, popup=popup, parent=parent)
 
         self._active_popup = None
         self._popup_pending_item = None
@@ -1288,7 +1347,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def closeEvent(self, e):
         self._cb.clear()
-        super().closeEvent(e)
+        FloatingWidget.closeEvent(self, e)
         self.deleteLater()
 
     # =================================================================================
@@ -1562,12 +1621,12 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def enterEvent(self, event):
         self._update_interaction_state(True)
-        super().enterEvent(event)
+        FloatingWidget.enterEvent(self, event)
 
     def leaveEvent(self, event):
         # Small delay to see if we moved to the popup or just left
         QTimer.singleShot(150, lambda: self._update_interaction_state(False))
-        super().leaveEvent(event)
+        FloatingWidget.leaveEvent(self, event)
 
     def _handle_attr_hover(self, item):
         self._popup_pending_item = item
@@ -1677,7 +1736,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                     self._create_switch_item(enum_name, data)
 
         except Exception as e:
-            cmds.warning(f"Error rebuilding SpaceSwitch widgets: {e}")
+            cmds.warning("Error rebuilding SpaceSwitch widgets: {}".format(e))
         finally:
             self._update_interaction_state(self._is_ui_hovered, force=True)
             self._refresh_footer()
@@ -1689,7 +1748,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         display_name = self._format_object_name(target_nodes)
 
         attr_item = AttributeItem(
-            f"{display_name} {data['long'].title()}",
+            "{} {}".format(display_name, data["long"].title()),
             enum_name,
             target_nodes,
             data["objects"],
@@ -1738,11 +1797,16 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             gMainProgressBar = mel.eval("$tmp = $gMainProgressBar")
             bar_value = 1
             max_bar_value = len(keyframes.keys())
-            cmds.progressBar(gMainProgressBar, e=True, bp=True, max=max_bar_value)
+            cmds.progressBar(gMainProgressBar, e=True, bp=True, max=max_bar_value, ii=True)
 
             dictionary_xforms = {}
             current_time = cmds.currentTime(q=True)
+            interrupted = False
             for frame, targets in keyframes.items():
+                if cmds.progressBar(gMainProgressBar, q=True, ic=True):
+                    interrupted = True
+                    break
+
                 cmds.currentTime(frame)
                 dictionary_xforms[frame] = {}
                 for t in targets:
@@ -1754,14 +1818,18 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                     step=1,
                 )
                 bar_value += 1
-            bar_value = 1
+
             cmds.progressBar(gMainProgressBar, e=True, ep=True)
-            cmds.progressBar(gMainProgressBar, e=True, bp=True, max=max_bar_value)
-            for frame, targets in dictionary_xforms.items():
-                for target, xform in targets.items():
+
+            if not interrupted:
+                bar_value = 1
+                cmds.progressBar(gMainProgressBar, e=True, bp=True, max=max_bar_value, ii=False)
+                for frame, targets in dictionary_xforms.items():
                     cmds.currentTime(frame)
-                    attr = target_attrs[target] if target_attrs else enum_attr
-                    self.do_xform(target, attr, enum_value, xform)
+                    for target, xform in targets.items():
+                        attr = target_attrs[target] if target_attrs else enum_attr
+                        self.do_xform(target, attr, enum_value, xform)
+                    
                     cmds.progressBar(
                         gMainProgressBar,
                         edit=True,
@@ -1769,9 +1837,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                         step=1,
                     )
                     bar_value += 1
+                cmds.progressBar(gMainProgressBar, e=True, ep=True)
 
             cmds.currentTime(current_time)
-            cmds.progressBar(gMainProgressBar, e=True, ep=True)
 
         finally:
             if marker_widget:

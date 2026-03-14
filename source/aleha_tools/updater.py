@@ -1,12 +1,20 @@
+from __future__ import division
 import os
 import ssl
 import json
 import shutil
 import zipfile
-import urllib.request
-import urllib.error
-from pathlib import Path
-from http.client import responses
+import sys
+
+if sys.version_info[0] > 2:
+    import urllib.request as urllib_request
+    import urllib.error as urllib_error
+    from http.client import responses
+else:
+    import urllib2 as urllib_request
+    import urllib2 as urllib_error
+    import httplib
+    responses = httplib.responses
 
 try:
     from importlib import reload
@@ -43,7 +51,7 @@ def formatPath(path):
 
 
 def download(downloadUrl, saveFile):
-    response = urllib.request.urlopen(downloadUrl, context=unverified_ssl_context, timeout=60)
+    response = urllib_request.urlopen(downloadUrl, context=unverified_ssl_context, timeout=60)
 
     if response is None:
         cmds.warning("Error trying to install.")
@@ -86,14 +94,14 @@ def download(downloadUrl, saveFile):
 
 def install(tool, command=None, file_path=None):
     # Derive the actual installation path of `aleha_tools`
-    toolsFolder = Path(__file__).resolve().parent
-    scriptPath = toolsFolder.parent
+    toolsFolder = os.path.dirname(os.path.realpath(__file__))
+    scriptPath = os.path.dirname(toolsFolder)
 
-    tmpZipFile = scriptPath / "tmp.zip"
+    tmpZipFile = os.path.join(scriptPath, "tmp.zip")
 
-    if tmpZipFile.is_file():
+    if os.path.isfile(tmpZipFile):
         try:
-            tmpZipFile.unlink()
+            os.remove(tmpZipFile)
         except OSError:
             pass
 
@@ -110,8 +118,8 @@ def install(tool, command=None, file_path=None):
                 branch = parts[2] if len(parts) > 2 else "main"
                 try:
                     api_url = "https://api.github.com/repos/%s/%s/commits/%s" % (owner, repo, branch)
-                    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, context=unverified_ssl_context, timeout=10) as response:
+                    req = urllib_request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib_request.urlopen(req, context=unverified_ssl_context, timeout=10) as response:
                         if response.status == 200:
                             data = json.loads(response.read().decode("utf-8"))
                             sha = data.get("sha", "main")
@@ -122,7 +130,7 @@ def install(tool, command=None, file_path=None):
         FileUrl = "https://github.com/Alehaaaa/camstool/archive/%s.zip" % sha
         download(FileUrl, tmpZipFile)
 
-    if not tmpZipFile.is_file():
+    if not os.path.isfile(tmpZipFile):
         return cmds.error("Error trying to install.")
 
     zfobj = zipfile.ZipFile(tmpZipFile)
@@ -132,24 +140,24 @@ def install(tool, command=None, file_path=None):
         return cmds.error("Error trying to install.")
 
     # Remove old tool files
-    if toolsFolder.is_dir():
-        for filename in toolsFolder.iterdir():
-            if filename.name != "_prefs":
-                if filename.is_file():
+    if os.path.isdir(toolsFolder):
+        for item in os.listdir(toolsFolder):
+            if item != "_prefs":
+                item_path = os.path.join(toolsFolder, item)
+                if os.path.isfile(item_path):
                     try:
-                        filename.unlink()
+                        os.remove(item_path)
                     except OSError:
                         pass
-                elif filename.is_dir():
+                elif os.path.isdir(item_path):
                     try:
-                        shutil.rmtree(filename)
+                        shutil.rmtree(item_path)
                     except OSError:
                         pass
 
     for name in fileList:
         # GitHub archives look like: camstool-main/source/aleha_tools/__init__.py
-        path_in_zip = Path(name)
-        parts = path_in_zip.parts
+        parts = name.replace("\\", "/").split("/")
 
         # Find where 'aleha_tools' starts in the path
         try:
@@ -162,11 +170,11 @@ def install(tool, command=None, file_path=None):
             # This is the aleha_tools directory itself
             continue
 
-        filename = toolsFolder.joinpath(*rel_parts)
-        d = filename.parent
+        filename = os.path.join(toolsFolder, *rel_parts)
+        d = os.path.dirname(filename)
 
-        if not d.exists():
-            d.mkdir(parents=True)
+        if not os.path.exists(d):
+            os.makedirs(d)
 
         if name.endswith("/") or name.endswith(os.sep):
             continue
@@ -176,8 +184,8 @@ def install(tool, command=None, file_path=None):
             output.write(uncompressed)
 
     zfobj.close()
-    if tmpZipFile.is_file():
-        tmpZipFile.unlink()
+    if os.path.isfile(tmpZipFile):
+        os.remove(tmpZipFile)
 
     if not file_path:
         add_shelf_button(tool, command)
@@ -191,8 +199,8 @@ def add_shelf_button(tool, command=None):
     currentShelf = cmds.tabLayout(mel.eval("$nul=$gShelfTopLevel"), q=1, st=1)
 
     if not find_shelf_button(tool):
-        toolsFolder = Path(__file__).resolve().parent
-        icon_path = toolsFolder / "_icons" / (tool + ".svg")
+        toolsFolder = os.path.dirname(os.path.realpath(__file__))
+        icon_path = os.path.join(toolsFolder, "_icons", (tool + ".svg"))
         cmds.shelfButton(
             parent=currentShelf,
             i=str(icon_path),
@@ -219,8 +227,8 @@ def _fetch_repo_file(filename):
             branch = parts[2] if len(parts) > 2 else "main"
             api_url = "https://api.github.com/repos/%s/%s/commits/%s" % (owner, repo, branch)
             try:
-                req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, context=unverified_ssl_context, timeout=10) as response:
+                req = urllib_request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib_request.urlopen(req, context=unverified_ssl_context, timeout=10) as response:
                     if response.status == 200:
                         data = json.loads(response.read().decode("utf-8"))
                         if "sha" in data:
@@ -239,7 +247,7 @@ def _fetch_repo_file(filename):
 
 def _download_text(url):
     try:
-        with urllib.request.urlopen(url, context=unverified_ssl_context, timeout=30) as response:
+        with urllib_request.urlopen(url, context=unverified_ssl_context, timeout=30) as response:
             if response.status == 200:
                 text = response.read().decode("utf-8")
                 if not text:
@@ -248,7 +256,7 @@ def _download_text(url):
             else:
                 error_message = responses.get(response.status, "Unknown Error")
                 return False, NO_SERVER_ERROR % (response.status, error_message)
-    except urllib.error.URLError as e:
+    except urllib_error.URLError as e:
         reason = getattr(e, "reason", e)
         return False, "Network error: %s" % reason
     except TimeoutError:
@@ -279,7 +287,7 @@ class UpdateCheckWorker(QThread):
     finished = Signal(bool, object, object)  # success, latest_version, changelog
 
     def __init__(self, installed_version, force=False, delay=0, parent=None):
-        super().__init__(parent)
+        QThread.__init__(self, parent)
         self.installed_version = installed_version
         self.force = force
         self.delay = delay
@@ -342,10 +350,20 @@ def _check_for_updates(ui, warning=True, force=False):
                 )
             return
 
-        last_release_notes = changelog.get("versions", {}).get(latest_version, [])
-        formated_changelog = "<br/>".join(["- " + line.replace("<", "&lt;").replace(">", "&gt;") for line in last_release_notes])
+        versions_dict = changelog.get("versions", {})
+        all_notes = []
 
-        template = f"<title>Version {latest_version} available\n(using {installed_version})</title><text>These are the changes made:</text><separator/><text>{formated_changelog}</text>"
+        notes = versions_dict.get(latest_version, [])
+        if notes:
+            for line in notes:
+                all_notes.append(" - " + line.replace("<", "&lt;").replace(">", "&gt;"))
+
+        formated_changelog = "<br/>".join(all_notes)
+        template = (
+            "<title>Version {} available (using {})</title>\n".format(latest_version, installed_version)
+            + "<text>These are the changes made:</text>\n"
+            + "<text>{}</text>\n".format(formated_changelog)
+        )
 
         result = QFlatTooltipConfirm.question(
             ui.menu_bar,
@@ -383,7 +401,7 @@ def _check_for_updates(ui, warning=True, force=False):
 
                     QFlatTooltipConfirm.information(
                         ui.menu_bar,
-                        message="You have successfully updated the tool!<br><br>" + "These were the last changes:<br>" + formated_changelog,
+                        message=("You have successfully updated the tool!<br><br>\nThese were the last changes:<br>\n{}".format(formated_changelog)),
                         title="Installed %s %s" % (ui.TITLE, latest_version.replace("\n", "").replace("\r", "")),
                         icon=util.return_icon_path("success.svg"),
                     )

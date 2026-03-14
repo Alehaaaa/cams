@@ -88,51 +88,24 @@ class QFlatDialogButton(dict):
         if name_or_dict is not None:
             if isinstance(name_or_dict, (str, bytes)):
                 kwargs["name"] = name_or_dict
-                super().__init__(**kwargs)
+                dict.__init__(self, **kwargs)
             elif isinstance(name_or_dict, dict):
-                super().__init__(name_or_dict, **kwargs)
+                dict.__init__(self, name_or_dict, **kwargs)
             else:
-                super().__init__(**kwargs)
+                dict.__init__(self, **kwargs)
         else:
-            super().__init__(**kwargs)
+            dict.__init__(self, **kwargs)
 
     def copy(self):
-        return QFlatDialogButton(super().copy())
+        return QFlatDialogButton(dict.copy(self))
 
     def __eq__(self, other):
         if isinstance(other, (str, bytes)):
             return self.get("name") == other
-        return super().__eq__(other)
+        return dict.__eq__(self, other)
 
     def __ne__(self, other):
         return not self.__eq__(other)
-
-    def __or__(self, other):
-        if isinstance(other, (dict, QFlatDialogButton)):
-            return QFlatDialogButtonList([self, other])
-        if isinstance(other, list):
-            return QFlatDialogButtonList([self] + other)
-        if hasattr(super(), "__or__"):
-            return super().__or__(other)
-        return NotImplemented
-
-    def __ror__(self, other):
-        if isinstance(other, list):
-            return QFlatDialogButtonList(other + [self])
-        if hasattr(super(), "__ror__"):
-            return super().__ror__(other)
-        return NotImplemented
-
-
-class QFlatDialogButtonList(list):
-    """A list subclass that supports the | operator to combine buttons."""
-
-    def __or__(self, other):
-        if isinstance(other, (dict, QFlatDialogButton)):
-            return QFlatDialogButtonList(self + [other])
-        if isinstance(other, list):
-            return QFlatDialogButtonList(self + other)
-        return self
 
 
 class QFlatHoverableIcon:
@@ -246,7 +219,7 @@ class QFlatButton(QPushButton):
         highlight=False,
         parent=None,
     ):
-        super().__init__(text, parent)
+        QPushButton.__init__(self, text, parent)
         self.setFlat(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -310,7 +283,7 @@ class QFlatBottomBar(QFrame):
     """
 
     def __init__(self, buttons=[], margins=8, spacing=6, parent=None):
-        super().__init__(parent)
+        QFrame.__init__(self, parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         layout = QHBoxLayout(self)
@@ -345,7 +318,7 @@ class QFlatTooltip(QWidget):
     KEY_ORDER = [Qt.Key_Control, Qt.Key_Alt, Qt.Key_Shift]
 
     def __init__(self, text="", anchor_widget=None, icon=None, shortcuts=None, description=None, template=None, icon_obj=None):
-        super().__init__(get_maya_qt())
+        QWidget.__init__(self, get_maya_qt())
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -357,11 +330,11 @@ class QFlatTooltip(QWidget):
         if template is None:
             template = ""
             if icon:
-                template += f"<icon>{icon}</icon>"
+                template += "<icon>{}</icon>".format(icon)
             if text:
-                template += f"<title>{text.strip()}</title>"
+                template += "<title>{}</title>".format(text.strip())
             if description:
-                template += f"<text>{description.strip()}</text>"
+                template += "<text>{}</text>".format(description.strip())
         self.template = template
 
         self._auto_close_timer = QTimer(self)
@@ -440,7 +413,9 @@ class QFlatTooltip(QWidget):
         self.main_layout.setSpacing(0)
 
         self.main_layout.setSizeConstraint(QVBoxLayout.SetMinAndMaxSize)
-        self.setStyleSheet(f"QFlatTooltip > QFrame#BgFrame {{ background-color: {self.BG_COLOR}; border-radius: {DPI(self.BORDER_RADIUS)}px; }}")
+        self.setStyleSheet(
+            "QFlatTooltip > QFrame#BgFrame {{ background-color: {}; border-radius: {}px; }}".format(self.BG_COLOR, DPI(self.BORDER_RADIUS))
+        )
 
         self.bg_frame = QFrame()
         self.bg_frame.setObjectName("BgFrame")
@@ -460,11 +435,11 @@ class QFlatTooltip(QWidget):
             if "<br>" in safe_template.lower():
                 safe_template = re.sub(r"(?i)<br\s*>", "<br/>", safe_template)
 
-            root = ET.fromstring(f"<root>{safe_template}</root>")
+            root = ET.fromstring("<root>{}</root>".format(safe_template))
         except Exception as e:
-            root = ET.fromstring(f"<root><text>Invalid tooltip XML: {e}</text></root>")
+            root = ET.fromstring("<root><text>Invalid tooltip XML: {}</text></root>".format(e))
 
-        header_frame, header_layout = self._create_section_frame("", top_corners=True)
+        header_frame, header_layout = self._create_section_frame("")
         has_header = self._populate_header(root, header_layout)
         self.has_header = has_header
 
@@ -488,12 +463,9 @@ class QFlatTooltip(QWidget):
         if self.shortcuts:
             self._build_shortcuts_section()
 
-    def _create_section_frame(self, color, top_corners=False):
+    def _create_section_frame(self, color):
         frame = QFrame()
-        radius = DPI(self.BORDER_RADIUS) if top_corners else 0
-        frame.setStyleSheet(
-            f"background-color: {color}; border-top-left-radius: {radius}px; border-top-right-radius: {radius}px; border-bottom-left-radius: 0px; border-bottom-right-radius: 0px;"
-        )
+        frame.setStyleSheet("background-color: {};".format(color))
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(DPI(12), DPI(12), DPI(12), DPI(12))
         layout.setSpacing(DPI(8))
@@ -513,7 +485,8 @@ class QFlatTooltip(QWidget):
                     layout.addWidget(self._create_icon_label(pix, dim=29))
                     has_items = True
             elif child.tag == "title":
-                layout.addWidget(self._create_text_label(child.text or "", size=18, bold=True, elide=True))
+                inner_text = (child.text or "") + "".join(ET.tostring(c, encoding="utf-8").decode("utf-8") if sys.version_info[0] < 3 else ET.tostring(c, encoding="unicode") for c in child)
+                layout.addWidget(self._create_text_label(inner_text, size=18, bold=True, elide=True))
                 has_items = True
 
             if child.tag not in ["title", "icon"]:
@@ -529,16 +502,17 @@ class QFlatTooltip(QWidget):
                 continue
 
             if child.tag == "text":
-                lbl = QLabel(child.text or "")
+                inner_text = (child.text or "") + "".join(ET.tostring(c, encoding="utf-8").decode("utf-8") if sys.version_info[0] < 3 else ET.tostring(c, encoding="unicode") for c in child)
+                lbl = QLabel(inner_text)
                 lbl.setWordWrap(True)
                 lbl.setMaximumWidth(DPI(320))
                 lbl.setContentsMargins(DPI(12), DPI(4), DPI(12), DPI(6))
-                lbl.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(11.1)}px; background-color: transparent;")
+                lbl.setStyleSheet("color: {}; font-size: {}px; background-color: transparent;".format(self.TEXT_COLOR, DPI(11.1)))
                 layout.addWidget(lbl)
             elif child.tag == "separator":
                 sep = QFrame()
                 sep.setFixedHeight(1)
-                sep.setStyleSheet(f"background-color: {self.HEADER_COLOR}; margin: {DPI(4)}px {DPI(12)}px;")
+                sep.setStyleSheet("background-color: {}; margin: {}px {}px;".format(self.HEADER_COLOR, DPI(4), DPI(12)))
                 layout.addWidget(sep)
             elif child.tag in ["image", "gif"]:
                 layout.addWidget(self._create_media_label(child.text or "", is_gif=(child.tag == "gif")))
@@ -564,7 +538,7 @@ class QFlatTooltip(QWidget):
             row.addWidget(self._create_icon_label(pix, dim=17))
 
             name = QLabel(sh.get("label", ""))
-            name.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
+            name.setStyleSheet("color: {}; font-size: {}px;".format(self.TEXT_COLOR, DPI(10.5)))
             row.addWidget(name)
             row.addStretch()
 
@@ -572,7 +546,7 @@ class QFlatTooltip(QWidget):
             if isinstance(command, list):
                 command = self._format_keys(command)
             keys = QLabel(command)
-            keys.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(10.5)}px;")
+            keys.setStyleSheet("color: {}; font-size: {}px;".format(self.TEXT_COLOR, DPI(10.5)))
             row.addWidget(keys)
             self.bg_layout.addLayout(row)
             self.bg_layout.addSpacing(DPI(4))
@@ -592,7 +566,7 @@ class QFlatTooltip(QWidget):
         lbl.setToolTip(text)
         lbl.setWordWrap(True)
 
-        style = f"#text_label {{ color: {self.TEXT_COLOR}; font-size: {DPI(size)}px; {'font-weight: bold;' if bold else ''}}}"
+        style = "#text_label {{ color: {0}; font-size: {1}px; {2}}}".format(self.TEXT_COLOR, DPI(size), "font-weight: bold;" if bold else "")
         lbl.setStyleSheet(style)
         if align:
             lbl.setAlignment(align)
@@ -707,7 +681,7 @@ class QFlatTooltip(QWidget):
         self.show()
 
 
-class QFlatTooltipManager:
+class QFlatTooltipManager(object):
     """Manages global state for QFlatTooltips ensuring only one exists at a time."""
 
     _current_tooltip = None
@@ -793,7 +767,7 @@ class QFlatDialog(QDialog):
         if parent is None:
             parent = get_maya_qt()
 
-        super().__init__(parent)
+        QDialog.__init__(self, parent)
         if sys.platform != "win32":
             self.setWindowFlags(self.windowFlags() | Qt.Tool)
 
@@ -850,7 +824,7 @@ class QFlatDialog(QDialog):
             if self._default_button:
                 self._default_button.click()
                 return
-        super().keyPressEvent(event)
+        QDialog.keyPressEvent(self, event)
 
     def setBottomBar(self, buttons=None, margins=8, spacing=6, closeButton=False, highlight=None):
         if self.bottomBar:
@@ -897,7 +871,7 @@ class QFlatConfirmDialog(QFlatDialog):
         exclusive=True,
         parent=None,
     ):
-        super().__init__(parent=parent, buttons=buttons, highlight=highlight, closeButton=closeButton)
+        QFlatDialog.__init__(self, parent=parent, buttons=buttons, highlight=highlight, closeButton=closeButton)
 
         new_flags = self.windowFlags() | Qt.Dialog
         if parent and (parent.windowFlags() & Qt.Tool):
@@ -1049,7 +1023,7 @@ class QFlatTooltipConfirm(QFlatDialog):
     ARROW_H = 8
 
     def __init__(self, parent=None, title="", message="", buttons=None, icon=None, template=None, highlight=None):
-        super().__init__(parent=parent, buttons=buttons, highlight=highlight)
+        QFlatDialog.__init__(self, parent=parent, buttons=buttons, highlight=highlight)
 
         # Tooltip-like window setup
         self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
@@ -1060,22 +1034,22 @@ class QFlatTooltipConfirm(QFlatDialog):
         if template is None:
             template = ""
             if icon:
-                template += f"<icon>{icon}</icon>"
+                template += "<icon>{}</icon>".format(icon)
             if title:
-                template += f"<title>{title}</title>"
+                template += "<title>{}</title>".format(title)
             if message:
-                template += f"<text>{message}</text>"
+                template += "<text>{}</text>".format(message)
         else:
             # If template provided, ensure icon/title are included if passed as args and missing in xml
             if icon and "<icon>" not in template:
-                template = f"<icon>{icon}</icon>{template}"
+                template = "<icon>{}</icon>{}".format(icon, template)
             if title and "<title>" not in template:
-                template = f"<title>{title}</title>{template}"
+                template = "<title>{}</title>{}".format(title, template)
         self.template = template
 
         # Style the frame
         self.setStyleSheet(
-            f"QFlatTooltipConfirm > QFrame#BgFrame {{ background-color: {self.BG_COLOR}; border-radius: {DPI(self.BORDER_RADIUS)}px; }}"
+            "QFlatTooltipConfirm > QFrame#BgFrame {{ background-color: {}; border-radius: {}px; }}".format(self.BG_COLOR, DPI(self.BORDER_RADIUS))
         )
 
         self.bg_frame = QFrame()
@@ -1104,9 +1078,9 @@ class QFlatTooltipConfirm(QFlatDialog):
             if "<br>" in safe_template.lower():
                 safe_template = re.sub(r"(?i)<br\s*>", "<br/>", safe_template)
 
-            root = ET.fromstring(f"<root>{safe_template}</root>")
+            root = ET.fromstring("<root>{}</root>".format(safe_template))
         except Exception as e:
-            root = ET.fromstring(f"<root><text>Invalid XML: {e}</text></root>")
+            root = ET.fromstring("<root><text>Invalid XML: {}</text></root>".format(e))
 
         # 1. Header Area (Icon + Title)
         header_frame = QFrame()
@@ -1125,8 +1099,9 @@ class QFlatTooltipConfirm(QFlatDialog):
                     header_layout.addWidget(lbl)
                     has_header = True
             elif child.tag == "title":
-                lbl = QLabel(child.text or "")
-                lbl.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(18)}px; font-weight: bold; background: transparent;")
+                inner_text = (child.text or "") + "".join(ET.tostring(c, encoding="utf-8").decode("utf-8") if sys.version_info[0] < 3 else ET.tostring(c, encoding="unicode") for c in child)
+                lbl = QLabel(inner_text)
+                lbl.setStyleSheet("color: {}; font-size: {}px; font-weight: bold; background: transparent;".format(self.TEXT_COLOR, DPI(18)))
                 lbl.setWordWrap(True)
                 header_layout.addWidget(lbl)
                 has_header = True
@@ -1148,14 +1123,15 @@ class QFlatTooltipConfirm(QFlatDialog):
                 continue
 
             if child.tag == "text":
-                lbl = QLabel(child.text or "")
+                inner_text = (child.text or "") + "".join(ET.tostring(c, encoding="utf-8").decode("utf-8") if sys.version_info[0] < 3 else ET.tostring(c, encoding="unicode") for c in child)
+                lbl = QLabel(inner_text)
                 lbl.setWordWrap(True)
-                lbl.setStyleSheet(f"color: {self.TEXT_COLOR}; font-size: {DPI(11.5)}px; background: transparent;")
+                lbl.setStyleSheet("color: {}; font-size: {}px; background: transparent;".format(self.TEXT_COLOR, DPI(11.5)))
                 content_layout.addWidget(lbl)
             elif child.tag == "separator":
                 sep = QFrame()
                 sep.setFixedHeight(1)
-                sep.setStyleSheet(f"background-color: rgba(255,255,255,10); margin: {DPI(4)}px 0px;")
+                sep.setStyleSheet("background-color: rgba(255,255,255,10); margin: {}px 0px;".format(DPI(4)))
                 content_layout.addWidget(sep)
             elif child.tag in ["image", "gif"]:
                 lbl = QLabel()
@@ -1251,10 +1227,8 @@ class QFlatTooltipConfirm(QFlatDialog):
         self.adjustSize()
         w, h = self.width(), self.height()
 
-        # Position relative to the anchor (Left-aligned as requested)
-        # If showing on top (side='bottom'), anchor to top-left corner.
-        # If showing on bottom (side='top'), anchor to bottom-left corner.
-        pos = QPoint(self._global_anc.left(), self._global_anc.bottom() + DPI(2))
+        target_x = self._global_anc.left()
+        pos = QPoint(target_x - w // 2, self._global_anc.bottom() + DPI(2))
 
         screen = QGuiApplication.screenAt(cursor_pos) or QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
@@ -1267,13 +1241,13 @@ class QFlatTooltipConfirm(QFlatDialog):
             w, h = self.width(), self.height()
             pos.setY(self._global_anc.top() - h - DPI(2))
 
-        # Horizontal screen safety (keep it within screen bounds while trying to stay at widget.left())
+        # Horizontal screen safety (keep it within screen bounds while trying to stay centered on target_x)
         final_x = max(geo.left() + DPI(5), min(pos.x(), geo.right() - w - DPI(5)))
         pos.setX(final_x)
         self.move(pos)
 
         # Arrow points exactly to the widget's left corner (clamped to tooltip edges)
-        arrow_x = self._global_anc.left() - final_x
+        arrow_x = target_x - final_x
         aw = DPI(self.ARROW_W)
         self.arrow_x = max(DPI(6) + aw / 2, min(arrow_x, w - DPI(6) - aw / 2))
         self.update()

@@ -9,7 +9,7 @@ from pathlib import Path
 
 class CamsToolUpdater:
     def __init__(self, script_folder=None, cams_version=None):
-        self.project_root = Path(__file__).resolve().parents[1]
+        self.project_root = Path(os.path.realpath(__file__)).parents[1]
         self.versions_folder = self.project_root / "versions"
 
         self.script_folder = (
@@ -40,7 +40,7 @@ class CamsToolUpdater:
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
 
         # Manually load .env file to identify GEMINI_API_KEY without dotenv module
-        env_path = Path(__file__).resolve().parent / ".env"
+        env_path = Path(os.path.realpath(__file__)).parent / ".env"
         if env_path.exists():
             with open(env_path, "r", encoding="utf-8") as f:
                 for line in f:
