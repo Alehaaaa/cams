@@ -400,15 +400,13 @@ def _check_for_updates(ui, warning=True, force=False):
                     reload(cams)
                     cams.show()
 
-                    QFlatTooltipConfirm.information(
-                        ui.menu_bar,
-                        message=(
-                            "You have successfully updated the tool!<br><br>\nThese were the last changes:<br>\n{}".format(
-                                formated_changelog
-                            )
-                        ),
+                    QFlatConfirmDialog.information(
+                        None,
+                        "Updated",
                         title="Installed %s %s" % (ui.TITLE, latest_version.replace("\n", "").replace("\r", "")),
+                        message=("You have successfully updated the tool!<br><br>\nThese were the last changes:<br>\n{}".format(formated_changelog)),
                         icon=util.return_icon_path("success.svg"),
+                        closeButton=True,
                     )
 
                 QTimer.singleShot(0, _post_update)
