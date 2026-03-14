@@ -15,8 +15,10 @@ DATA = {
     "VERSION": "0.2.94",
     "AUTHOR": {
         "name": "Alehaaa",
-        "website": "https://alehaaaa.github.io",
-        "github": "https://github.com/Alehaaaa/camstool",
-        "instagram": "https://www.instagram.com/alejandro_anim/",
+        "links": {
+            "Website": "https://alehaaaa.github.io",
+            "GitHub": "https://github.com/Alehaaaa/cams",
+            "Instagram": "https://www.instagram.com/alejandro_anim/",
+        },
     },
 }

@@ -205,7 +205,7 @@ class QFlatMenuTitleAction(QWidgetAction):
     def __init__(self, version, parent=None):
         QWidgetAction.__init__(self, parent)
         self.version = version
-        self.website = DATA["AUTHOR"]["website"]
+        self.website = list(DATA["AUTHOR"]["links"].values())[0]
 
         self.triggered.connect(self._on_triggered)
 
@@ -1813,9 +1813,7 @@ class QAboutDialog(QFlatDialog):
             <div style='text-align: center; color: #888888; font-size: %spx;'>
                 <p>© 2023 by <a href='%s' style='color: #cccccc; text-decoration: none;'>%s</a>. All rights reserved.</p>
                 <div style='margin-top: 10px;'>
-                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>Instagram</a> &nbsp;|&nbsp; 
-                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>GitHub</a> &nbsp;|&nbsp; 
-                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>Website</a>
+                    %s
                 </div>
                 <p style='margin-top: 15px; font-style: italic; color: #777777;'>
                     If you like this tool, consider sending me some love!
@@ -1823,11 +1821,11 @@ class QAboutDialog(QFlatDialog):
             </div>
         """ % (
             DPI(11),
-            self._author["website"],
+            list(self._author["links"].values())[0],
             self._author["name"],
-            self._author["instagram"],
-            self._author["github"],
-            self._author["website"],
+            " &nbsp;|&nbsp; ".join(
+                [f"<a href='{url}' style='color: #67b9e0; text-decoration: none;'>{name}</a>" for name, url in self._author["links"].items()]
+            ),
         )
 
         info_label = QLabel(info_text)
