@@ -358,9 +358,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         self.main_layout.addWidget(self.cams_scroll)
 
-        self.dock_ui_btn = QPushButton()
-        self.dock_ui_btn.setToolTip("Dock to UI")
-        self.dock_ui_btn.setStatusTip("Dock to UI")
+        self.dock_ui_btn = widgets.QFlatPushButton(title="Dock to UI", description="Dock Cams back to the Maya UI")
         self.dock_ui_btn.setIcon(QIcon(util.return_icon_path("dock")))
         self.dock_ui_btn.setFixedSize(util.DPI(15), util.DPI(15))
         self.dock_ui_btn.setStyleSheet("""
@@ -488,9 +486,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             "Check for Updates",
             description="Check online to see if a newer version of Cams is available.",
         )
-        menu_general.addMenu(
-            self._create_settings_menu(), description="Advanced system preferences, startup behaviors, and uninstallation."
-        )
+        menu_general.addMenu(self._create_settings_menu(), description="Advanced system preferences, startup behaviors, and uninstallation.")
         self.about = menu_general.addAction(
             QIcon(util.return_icon_path("info")), "About", description="General information about Cams and the author."
         )
@@ -604,9 +600,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         )
         self.startup_run_Cams_checkbox.setCheckable(True)
         self.startup_run_Cams_checkbox.setChecked(self.startup_run_cams)
-        self.startup_run_Cams_checkbox.triggered.connect(
-            lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state)
-        )
+        self.startup_run_Cams_checkbox.triggered.connect(lambda state=self.startup_run_Cams_checkbox.isChecked(): self.change_startup_run_cams(state))
 
         self.startup_Viewport_checkbox = system_menu.addAction(
             "Viewport on Startup", description="Apply saved display settings (like grids, curves) to viewports when opening a scene."
@@ -622,9 +616,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         )
         self.startup_HUD_checkbox.setCheckable(True)
         self.startup_HUD_checkbox.setChecked(self.startup_hud)
-        self.startup_HUD_checkbox.triggered.connect(
-            lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state)
-        )
+        self.startup_HUD_checkbox.triggered.connect(lambda state=self.startup_HUD_checkbox.isChecked(): self.process_prefs(startup_hud=state))
 
         system_menu.addSeparator()
 
@@ -1090,7 +1082,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         except Exception:
             pass
 
-        self.settings_window = widgets.QFlatSettingsDialog
+        self.settings_window = widgets.QSettingsDialog
         self.settings_window.showUI(self)
 
     def apply_camera_default(self, cam, button=None):
@@ -1140,7 +1132,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
     """
 
     def coffee(self):
-        _coffee = widgets.QFlatAboutDialog.showUI(self, data=DATA)
+        _coffee = widgets.QAboutDialog.showUI(self, data=DATA)
         _coffee._check_updates.connect(lambda: funcs.check_for_updates(self))
 
     def resizeEvent(self, event):

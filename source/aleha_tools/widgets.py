@@ -18,7 +18,6 @@ try:
         QVBoxLayout,
         QCheckBox,
         QColorDialog,
-        QTextBrowser,
     )
     from PySide6.QtGui import (  # type: ignore
         QIcon,
@@ -67,7 +66,6 @@ except ImportError:
         QVBoxLayout,
         QCheckBox,
         QColorDialog,
-        QTextBrowser,
     )
     from PySide2.QtGui import (
         QIcon,
@@ -311,10 +309,7 @@ class QFlatMenu(QMenu):
 
 class QFlatOpenMenu(QFlatMenu):
     def __init__(self, title=None, parent=None):
-        if title:
-            QFlatMenu.__init__(self, title, parent)
-        else:
-            QFlatMenu.__init__(self, parent)
+        QFlatMenu.__init__(self, title, parent)
 
     def mouseReleaseEvent(self, e):
         action = self.actionAt(e.pos())
@@ -332,9 +327,37 @@ class QFlatOpenMenu(QFlatMenu):
             QFlatMenu.mouseReleaseEvent(self, e)
 
 
+class QFlatPushButton(QPushButton):
+    def __init__(self, *args, **kwargs):
+        self.title = kwargs.pop("title", None)
+        self._description = kwargs.pop("description", None)
+        super(QFlatPushButton, self).__init__(*args, **kwargs)
+
+        if self._description:
+            self.setStatusTip(" - ".join([self.title, self._description]))
+
+    def enterEvent(self, event):
+        if self._description:
+            title = self.title or self.text() or self.toolTip() or self.objectName()
+            QFlatTooltipManager.delayed_show(
+                text=title,
+                anchor_widget=self,
+                description=self._description,
+                icon_obj=self.icon() if not self.icon().isNull() else None,
+            )
+        super(QFlatPushButton, self).enterEvent(event)
+
+    def leaveEvent(self, event):
+        QFlatTooltipManager.cancel_timer()
+        QFlatTooltipManager.hide()
+        super(QFlatPushButton, self).leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        QFlatTooltipManager.hide()
+        super(QFlatPushButton, self).mousePressEvent(event)
+
+
 # QLineEdit that doesn't trigger next action
-
-
 class QFlatRenameEdit(QLineEdit):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
@@ -875,7 +898,7 @@ class QFlatCamButton(QPushButton):
             elif act_type == "tear_off":
                 action = partial(tear_off_cam, self._camera)
             elif act_type == "attributes":
-                action = partial(QFlatAttributesDialog.showUI, self._camera, self.window())
+                action = partial(QAttributesDialog.showUI, self._camera, self.window())
 
         self.setIcon(self.icons[icon_name])
         try:
@@ -1057,7 +1080,7 @@ class QFlatCamButton(QPushButton):
         menu.addAction(
             self.icons["attributes"],
             "Attributes",
-            partial(QFlatAttributesDialog.showUI, self._camera, self.window()),
+            partial(QAttributesDialog.showUI, self._camera, self.window()),
             description="Open the detailed attribute editor for this specific camera.",
         )
 
@@ -1162,7 +1185,7 @@ class QFlatScrollArea(QScrollArea):
 # CAMERA ATTRIBUTES DIALOG #################################################
 
 
-class QFlatAttributesDialog(QFlatDialog):
+class QAttributesDialog(QFlatDialog):
     dlg_instance = None
 
     @classmethod
@@ -1173,7 +1196,7 @@ class QFlatAttributesDialog(QFlatDialog):
         except Exception:
             pass
 
-        cls.dlg_instance = QFlatAttributesDialog(cams, parent)
+        cls.dlg_instance = QAttributesDialog(cams, parent)
         cls.dlg_instance.show()
 
     def __init__(self, cam, parent=None):
@@ -1386,10 +1409,7 @@ class QFlatAttributesDialog(QFlatDialog):
         self.gate_mask_color_slider.valueChanged.connect(lambda: self.update_button_value(self.gate_mask_color_slider.value()))
 
     def create_lock_button(self):
-        lock_btn = QPushButton()
-        lock_btn.setToolTip("Break connection")
-        lock_btn.setStatusTip("Break connection")
-
+        lock_btn = QFlatPushButton(title="Break connection", description="Break connection of the attribute")
         lock_btn.setIcon(QIcon(return_icon_path("locked")))
         lock_btn.setFixedSize(DPI(15), DPI(15))
 
@@ -1486,7 +1506,7 @@ class QFlatAttributesDialog(QFlatDialog):
 # DEFAULT SETTINGS DIALOG ##################################################
 
 
-class QFlatSettingsDialog(QFlatDialog):
+class QSettingsDialog(QFlatDialog):
     dlg_instance = None
 
     @classmethod
@@ -1497,7 +1517,7 @@ class QFlatSettingsDialog(QFlatDialog):
         except Exception:
             pass
 
-        cls.dlg_instance = QFlatSettingsDialog(parent)
+        cls.dlg_instance = QSettingsDialog(parent)
         cls.dlg_instance.show()
 
     def __init__(self, parent=None):
@@ -1714,7 +1734,7 @@ class QFlatSettingsDialog(QFlatDialog):
 # ABOUT DIALOG #############################################################
 
 
-class QFlatAboutDialog(QFlatDialog):
+class QAboutDialog(QFlatDialog):
     dlg_instance = None
     _check_updates = Signal()
 
@@ -1726,7 +1746,7 @@ class QFlatAboutDialog(QFlatDialog):
         if cmds.window(name, exists=True):
             cmds.deleteUI(name)
 
-        cls.dlg_instance = QFlatAboutDialog(parent, data=data)
+        cls.dlg_instance = QAboutDialog(parent, data=data)
         cls.dlg_instance.show()
         cls.dlg_instance.raise_()
         cls.dlg_instance.activateWindow()
@@ -1793,8 +1813,9 @@ class QFlatAboutDialog(QFlatDialog):
             <div style='text-align: center; color: #888888; font-size: %spx;'>
                 <p>© 2023 by <a href='%s' style='color: #cccccc; text-decoration: none;'>%s</a>. All rights reserved.</p>
                 <div style='margin-top: 10px;'>
-                    <a href='%s' style='color: #5D99C6; text-decoration: none;'>Instagram</a> &nbsp;|&nbsp; 
-                    <a href='%s' style='color: #5D99C6; text-decoration: none;'>Website</a>
+                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>Instagram</a> &nbsp;|&nbsp; 
+                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>GitHub</a> &nbsp;|&nbsp; 
+                    <a href='%s' style='color: #67b9e0; text-decoration: none;'>Website</a>
                 </div>
                 <p style='margin-top: 15px; font-style: italic; color: #777777;'>
                     If you like this tool, consider sending me some love!
@@ -1805,37 +1826,24 @@ class QFlatAboutDialog(QFlatDialog):
             self._author["website"],
             self._author["name"],
             self._author["instagram"],
+            self._author["github"],
             self._author["website"],
         )
-        # Combine info text and style into one HTML document
-        full_info_html = (
-            """
-            <style>
-                a { color: #5D99C6; text-decoration: none; }
-                a:hover { color: #A0C8EA; }
-            </style>
-            <div style='text-align: center;'>
-                %s
-            </div>
-        """
-            % info_text
-        )
 
-        info_browser = QTextBrowser()
-        info_browser.setHtml(full_info_html)
-        info_browser.setReadOnly(True)
-        info_browser.setFrameShape(QFrame.NoFrame)
-        info_browser.setStyleSheet("background: transparent;")
-        info_browser.viewport().setStyleSheet("background: transparent;")
-        info_browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        info_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        info_browser.setOpenExternalLinks(True)
-        info_browser.setFocusPolicy(Qt.NoFocus)
-        info_browser.setFixedHeight(DPI(85))
+        info_label = QLabel(info_text)
+        info_label.setAlignment(Qt.AlignCenter)
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        info_label.setOpenExternalLinks(False)
+        info_label.linkActivated.connect(self._open_link)
+        info_label.setStyleSheet("background: transparent;")
 
-        content_layout.addWidget(info_browser)
+        content_layout.addWidget(info_label)
         self.root_layout.addWidget(content_widget)
 
         self.setBottomBar(closeButton=True)
         self.resize(DPI(300), DPI(150))
         self.adjustSize()
+
+    def _open_link(self, url):
+        webbrowser.open(url)

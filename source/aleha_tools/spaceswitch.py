@@ -386,12 +386,7 @@ class FloatingWidget(base_widgets.QFlatDialog):
         if self.frameGeometry().contains(cursor_pos):
             return True
 
-        if (
-            hasattr(self, "_active_popup")
-            and self._active_popup
-            and util.is_valid_widget(self._active_popup)
-            and self._active_popup.isVisible()
-        ):
+        if hasattr(self, "_active_popup") and self._active_popup and util.is_valid_widget(self._active_popup) and self._active_popup.isVisible():
             if self._active_popup.frameGeometry().contains(cursor_pos):
                 return True
         return False
@@ -1376,9 +1371,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         selection_layout.setContentsMargins(0, util.DPI(6), 0, util.DPI(8))
 
         selection_title = QLabel("Selection")
-        selection_title.setStyleSheet(
-            "font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR)
-        )
+        selection_title.setStyleSheet("font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR))
         selection_title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         selection_title.setWordWrap(False)
         selection_title.setFixedHeight(selection_title.fontMetrics().height() + 2)
@@ -1957,26 +1950,24 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.context_menu.aboutToShow.connect(self._suspend_auto_close)
         self.context_menu.aboutToHide.connect(self._resume_auto_close)
 
-        self.toggle_namespaces_action = self.context_menu.addAction(
-            "Show namespaces", description="Toggle namespace visibility in the viewport."
-        )
+        self.toggle_namespaces_action = self.context_menu.addAction("Show namespaces", description="Show namespaces for listed attributes.")
         self.toggle_namespaces_action.setCheckable(True)
         self.toggle_namespaces_action.setChecked(self.namespace_display)
 
         self.show_rotate_order_action = self.context_menu.addAction(
-            "Enable Rotate Order", description="Enable rotate order in the viewport."
+            "Enable Rotate Order", description="List Rotate Order attributes for selected objects."
         )
         self.show_rotate_order_action.setCheckable(True)
         self.show_rotate_order_action.setChecked(self.show_rotate_order)
 
         self.context_menu.addSeparator()
 
-        self.euler_filter_action = self.context_menu.addAction("Auto Euler Filter", description="Enable auto euler filter.")
+        self.euler_filter_action = self.context_menu.addAction("Auto Euler Filter", description="Apply euler filter to switched attributes.")
         self.euler_filter_action.setCheckable(True)
         self.euler_filter_action.setChecked(self.euler_filter)
 
         self.context_menu.addSeparator()
-        self.about_action = self.context_menu.addAction("About", description="Show credits dialog.")
+        self.about_action = self.context_menu.addAction("About", description="General information about SpaceSwitch and the author.")
         self.about_action.setIcon(QIcon(util.return_icon_path("info")))
         self.about_action.triggered.connect(self.show_credits_dialog)
 
@@ -2004,9 +1995,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     def show_credits_dialog(self):
         """Displays credits/donation dialog."""
         self._suspend_auto_close()
-        widgets.QFlatAboutDialog.showUI(self, data=DATA)
-        if widgets.QFlatAboutDialog.dlg_instance:
-            widgets.QFlatAboutDialog.dlg_instance.finished.connect(lambda *args: self._resume_auto_close())
+        widgets.QAboutDialog.showUI(self, data=DATA)
+        if widgets.QAboutDialog.dlg_instance:
+            widgets.QAboutDialog.dlg_instance.finished.connect(lambda *args: self._resume_auto_close())
 
     # =================================================================================
     #  7. APPLICATION ACTIONS

@@ -1,5 +1,9 @@
 {
     "versions": {
+        "0.2.94": [
+            "Updated some buttons to use the new Tooltips.",
+            "Added GitHub repository to the About Dialog."
+        ],
         "0.2.93-hotfix": [
             "Fixed some SpaceSwitch imports."
         ],
