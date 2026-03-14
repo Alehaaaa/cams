@@ -629,7 +629,7 @@ class QFlatCamButton(QPushButton):
             default_cam_menu_grp = QActionGroup(self)
 
             for c in get_cameras(default=True):
-                description = "Set this camera as the new primary/default camera."
+                description = "Set %s as the default camera." % c
                 action = default_cam_menu.addAction(c, partial(self._set_default_cam, (c, True), menu), description=description)
                 default_cam_menu_grp.addAction(action)
                 action.setCheckable(True)
