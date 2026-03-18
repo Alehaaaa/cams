@@ -99,20 +99,45 @@ VERSION = DATA["VERSION"]
 # Import HUDWindow
 from ._tools import HUDWindow as hud  # noqa: E402
 
+if "cams_aleha_tool" not in globals():
+    cams_aleha_tool = None
+
 
 def welcome():
     funcs.install_userSetup()
     show()
 
 
+def toggle():
+    global cams_aleha_tool
+    ctrl_name = TITLE + "WorkspaceControl"
+
+    # 1. Check if the control is currently visible (Safe Maya-native check)
+    if cmds.workspaceControl(ctrl_name, q=True, exists=True) and cmds.workspaceControl(ctrl_name, q=True, visible=True):
+        cmds.workspaceControl(ctrl_name, e=True, visible=False)
+        return
+
+    # 2. Try to re-show the existing instance if it's alive.
+    # Instead of checking isValid (which can be flaky during reloads), 
+    # we just try to call it and catch the "deleted" error.
+    try:
+        if cams_aleha_tool:
+            cams_aleha_tool.showWindow()
+            return
+    except (RuntimeError, AttributeError):
+        pass
+
+    # 3. Fallback: recreate the tool
+    show()
+
+
 def show():
     global cams_aleha_tool
-    if "cams_aleha_tool" in globals():
-        try:
+    try:
+        if cams_aleha_tool:
             funcs.close_UI(cams_aleha_tool)
-        except Exception:
-            pass
-        del cams_aleha_tool
+    except (RuntimeError, AttributeError):
+        pass
     try:
         funcs.close_all_Windows()
     except Exception:
@@ -171,6 +196,13 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.set_global_preferences()
 
         self.installEventFilter(self)
+
+        self.destroyed.connect(self._clear_instance)
+
+    def _clear_instance(self, *args):
+        global cams_aleha_tool
+        if cams_aleha_tool is self:
+            cams_aleha_tool = None
 
     @property
     def keys_pressed(self):
@@ -262,9 +294,8 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
                 self.shelf_painter.hide()
 
     def showWindow(self, dock=True):
-        funcs.close_all_Windows()
-
-        self.show(dockable=True, retain=False)
+        # Using retain=True ensures the widget isn't deleted when the control is hidden
+        self.show(dockable=True, retain=True)
 
         if dock:
             self.dock_ui_btn.setHidden(True)

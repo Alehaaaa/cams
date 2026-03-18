@@ -1,5 +1,10 @@
 {
     "versions": {
+        "0.2.95beta": [
+            "Added UI toggle command.",
+            "Improved UI instance handling.",
+            "UI now persists when hidden? work in progress."
+        ],
         "0.2.94": [
             "Updated some buttons to use the new Tooltips.",
             "Added GitHub repository to the About Dialog."

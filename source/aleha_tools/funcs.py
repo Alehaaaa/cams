@@ -132,13 +132,6 @@ def unistall(ui):
                     cmds.deleteUI(b)
 
         close_UI(ui, confirm=False)
-        if "cams_aleha_tool" in globals():
-            try:
-                del cams_aleha_tool  # noqa: F821
-            except Exception:
-                pass
-            if ui:
-                del ui
 
 
 def get_camsDisplay_modeleditor():
