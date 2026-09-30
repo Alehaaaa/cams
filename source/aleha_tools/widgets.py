@@ -101,7 +101,10 @@ import webbrowser
 
 from functools import partial
 
+from .tooltip_mixins import TooltipMixin, MenuTooltipMixin, ActionTooltipMixin, QFlatAction
+
 from .util import (
+    is_valid_widget,
     DPI,
     return_icon_path,
     get_cameras,
@@ -138,64 +141,71 @@ CONTEXTUAL_CURSOR = QCursor(QPixmap(":/rmbMenu.png"), hotX=11, hotY=8)
 
 
 class QFlatShelfPainter(QWidget):
-    def __init__(self, parent=None):
-        QWidget.__init__(self, parent)
-        self.tabbar_width = DPI(16)
-        self.line_thickness = DPI(1)
-        self.line_color = QColor(130, 130, 130)
-        self.margin = DPI(4)
-        self.center = DPI(5)
-        self.offset = DPI(1.5)
+    """Paint the shelf texture over the native tab bar only."""
+
+    def __init__(self, tab_bar, background_source=None):
+        super().__init__(tab_bar)
+        self._tab_bar = tab_bar
+        self._background_source = background_source or tab_bar
+        # Maya owns the surrounding QTabWidget and may delete it while a paint
+        # event for this child is still queued.  Do not dereference that wrapper
+        # from paintEvent: PySide raises if its underlying C++ object is gone.
+        self._background_color = self._resolve_background_color()
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.NoFocus)
+        tab_bar.installEventFilter(self)
+        self.setGeometry(tab_bar.rect())
+        self.show()
+        self.raise_()
+
+    def _resolve_background_color(self):
+        source = self._background_source
+        if source is not None and is_valid_widget(source):
+            try:
+                return QColor(
+                    source.palette().color(source.backgroundRole())
+                )
+            except RuntimeError:
+                pass
+        return QColor(self.palette().color(self.backgroundRole()))
+
+    def sync_geometry(self):
+        """Match the painter geometry to its tab bar."""
+        if self._tab_bar and is_valid_widget(self._tab_bar):
+            self.setGeometry(self._tab_bar.rect())
+            self.raise_()
+            self.update()
+
+    def eventFilter(self, watched, event):
+        if watched is self._tab_bar and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
+            QEvent.LayoutRequest,
+        ):
+            self.setGeometry(self._tab_bar.rect())
+            self.raise_()
+            self.update()
+        return super().eventFilter(watched, event)
 
     def paintEvent(self, event):
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-
-        color = self.palette().color(self.backgroundRole())
         painter = QPainter(self)
-        painter.setPen(QPen(color, self.tabbar_width))
-        painter.drawLine(self.tabbar_width // 2, 0, self.tabbar_width // 2, self.height())
+        painter.fillRect(self.rect(), self._background_color)
 
-        pen = QPen(self.line_color)
-        pen.setWidth(1)  # Line width of 1 pixel
-        pen.setStyle(Qt.CustomDashLine)  # Enable custom dash pattern
-        pen.setDashPattern([0.01, DPI(3)])  # 1 pixel dot, 1 pixel space
+        pen = QPen(QColor(130, 130, 130))
+        pen.setWidth(max(1, DPI(1)))
+        pen.setCapStyle(Qt.RoundCap)
         painter.setPen(pen)
 
-        painter.drawLine(
-            QPointF(self.center - self.offset, self.margin / 3),
-            QPointF(self.center - self.offset, self.height() - self.margin),
-        )
-        painter.drawLine(
-            QPointF(self.center + self.offset, self.margin / 3),
-            QPointF(self.center + self.offset, self.height() - self.margin),
-        )
-
-    def resizeEvent(self, event):
-        self.update()
-
-    def updateDrawingParameters(
-        self,
-        tabbar_width=None,
-        line_thickness=None,
-        line_color=None,
-        margin=None,
-        center=None,
-        offset=None,
-    ):
-        """Update drawing parameters and refresh the widget."""
-        if tabbar_width is not None:
-            self.tabbar_width = tabbar_width.width()
-        if line_thickness is not None:
-            self.line_thickness = line_thickness
-        if line_color is not None:
-            self.line_color = line_color
-        if margin is not None:
-            self.margin = margin
-        if center is not None:
-            self.center = center
-        if offset is not None:
-            self.offset = offset
-        self.update()
+        center = DPI(5) - 1
+        offset = DPI(1.5)
+        top = 0.0
+        bottom = float(self.height() - 1)
+        dot_count = max(2, int(bottom // max(1, DPI(3))) + 1)
+        spacing = bottom / float(dot_count - 1)
+        for index in range(dot_count):
+            y = top + spacing * index
+            painter.drawPoint(QPointF(center - offset, y))
+            painter.drawPoint(QPointF(center + offset, y))
 
 
 # QMenu that doesn't close
@@ -237,74 +247,12 @@ class QFlatMenuTitleAction(QWidgetAction):
         return label
 
 
-class QFlatMenu(QMenu):
+class QFlatMenu(MenuTooltipMixin, QMenu):
     def __init__(self, title=None, parent=None):
         QMenu.__init__(self, title, parent)
-
         if parent and hasattr(parent, "destroyed"):
             parent.destroyed.connect(self.close)
-
-        self.triggered.connect(self._on_action_triggered)
-        self.hovered.connect(self._on_action_hovered)
-        self._last_hovered_action = None
-
-    def addAction(self, *args, **kwargs):
-        description = kwargs.pop("description", None)
-        action = QMenu.addAction(self, *args, **kwargs)
-        if description:
-            action.setProperty("description", description)
-            title = action.text().replace("&", "").strip()
-            action.setStatusTip("{} - {}".format(title, description))
-        return action
-
-    def addMenu(self, *args, **kwargs):
-        description = kwargs.pop("description", None)
-        item = QMenu.addMenu(self, *args, **kwargs)
-        if description:
-            # item can be QMenu or QAction depending on the overload
-            action = item.menuAction() if hasattr(item, "menuAction") else item
-            action.setProperty("description", description)
-            title = action.text().replace("&", "").strip()
-            action.setStatusTip("{} - {}".format(title, description))
-        return item
-
-    def _on_action_hovered(self, action):
-        if not action or self.actionGeometry(action).isNull():
-            return
-
-        if action == self._last_hovered_action and QFlatTooltipManager.is_active():
-            return
-
-        QFlatTooltipManager.hide()
-        self._last_hovered_action = action
-
-        desc = action.property("description")
-        if desc:
-            title = action.text().replace("&", "").strip()
-            template = "<title>{}</title><text>{}</text>".format(title, desc)
-
-            geometry = self.actionGeometry(action)
-            target_rect = QRect(self.mapToGlobal(geometry.topLeft()), geometry.size())
-
-            icon = action.icon() if not action.icon().isNull() else None
-            QFlatTooltipManager.delayed_show(
-                text=title, anchor_widget=self, target_rect=target_rect, description=desc, template=template, icon_obj=icon
-            )
-
-    def hideEvent(self, event):
-        self._last_hovered_action = None
-        QFlatTooltipManager.hide()
-        QMenu.hideEvent(self, event)
-
-    def leaveEvent(self, event):
-        self._last_hovered_action = None
-
-        QFlatTooltipManager.cancel_timer()
-        QMenu.leaveEvent(self, event)
-
-    def _on_action_triggered(self, action):
-        if isinstance(action, QWidgetAction):
-            return
+        self._init_tooltip_menu()
 
 
 class QFlatOpenMenu(QFlatMenu):
@@ -327,34 +275,21 @@ class QFlatOpenMenu(QFlatMenu):
             QFlatMenu.mouseReleaseEvent(self, e)
 
 
-class QFlatPushButton(QPushButton):
+class QFlatPushButton(TooltipMixin, QPushButton):
     def __init__(self, *args, **kwargs):
         self.title = kwargs.pop("title", None)
         self._description = kwargs.pop("description", None)
-        super(QFlatPushButton, self).__init__(*args, **kwargs)
-
-        if self._description:
-            self.setStatusTip(" - ".join([self.title, self._description]))
+        QPushButton.__init__(self, *args, **kwargs)
+        self.setToolTipData(text=self.title or self.text(), description=self._description or "")
 
     def enterEvent(self, event):
-        if self._description:
-            title = self.title or self.text() or self.toolTip() or self.objectName()
-            QFlatTooltipManager.delayed_show(
-                text=title,
-                anchor_widget=self,
-                description=self._description,
-                icon_obj=self.icon() if not self.icon().isNull() else None,
-            )
-        super(QFlatPushButton, self).enterEvent(event)
-
-    def leaveEvent(self, event):
-        QFlatTooltipManager.cancel_timer()
-        QFlatTooltipManager.hide()
-        super(QFlatPushButton, self).leaveEvent(event)
+        if not self.icon().isNull():
+            self._toolTipData["icon"] = self.icon()
+        TooltipMixin.enterEvent(self, event)
 
     def mousePressEvent(self, event):
         QFlatTooltipManager.hide()
-        super(QFlatPushButton, self).mousePressEvent(event)
+        QPushButton.mousePressEvent(self, event)
 
 
 # QLineEdit that doesn't trigger next action
@@ -838,14 +773,15 @@ class QFlatCamButton(QPushButton):
                     cam_name
                 )
                 QFlatTooltipManager.delayed_show(
-                    delay=800, text=self._camera, anchor_widget=self, icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc
+                    delay=1200, text=self._camera, anchor_widget=self, source_key="widget:{}".format(id(self)),
+                    icon=icon_path, shortcuts=self.SHORTCUT_CONFIG, description=desc
                 )
 
             self._handle_key_modifiers()
             self._set_background_color("light")
 
         elif event.type() == QEvent.Leave:
-            QFlatTooltipManager.cancel_timer()
+            QFlatTooltipManager.source_left(anchor_widget=self)
             self.setIcon(self.icons["default"])
             self._set_background_color("base")
 

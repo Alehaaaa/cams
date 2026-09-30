@@ -195,28 +195,37 @@ def install(tool, command=None, file_path=None):
 
 
 def add_shelf_button(tool, command=None):
-    from .util import find_shelf_button
-
-    currentShelf = cmds.tabLayout(mel.eval("$nul=$gShelfTopLevel"), q=1, st=1)
-
-    if not find_shelf_button(tool):
-        toolsFolder = os.path.dirname(os.path.realpath(__file__))
-        icon_path = os.path.join(toolsFolder, "_icons", (tool + ".svg"))
-        cmds.shelfButton(
-            parent=currentShelf,
-            i=str(icon_path),
-            label=tool,
-            c=command or "import aleha_tools." + tool + " as " + tool + ";" + tool + ".show()",
-            annotation=tool.title() + " by Aleha",
-        )
-
-        QFlatConfirmDialog.information(
-            None,
-            "Success",
-            title="Shelf button created",
-            message="You can now click the %s button on the shelf to launch the tool." % tool.title(),
-            closeButton=True,
-        )
+    current_shelf = cmds.tabLayout(mel.eval("$nul=$gShelfTopLevel"), q=True, st=True)
+    if not current_shelf:
+        return None
+    command = command or (
+        "import aleha_tools;aleha_tools.toggle()" if tool == "cams" else
+        "import aleha_tools.{0} as {0};{0}.show()".format(tool)
+    )
+    icon_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "_icons", tool + ".svg")
+    # Refresh a matching button in place, removing duplicates on this shelf.
+    matches = []
+    for child in cmds.shelfLayout(current_shelf, query=True, childArray=True) or []:
+        if not cmds.shelfButton(child, exists=True):
+            continue
+        if (cmds.shelfButton(child, query=True, label=True) == tool
+                or cmds.shelfButton(child, query=True, command=True) == command):
+            matches.append(child)
+    kwargs = dict(image=icon_path, label=tool, command=command,
+                  sourceType="python", annotation=tool.title() + " by Aleha")
+    if matches:
+        button = matches[0]
+        cmds.shelfButton(button, edit=True, **kwargs)
+        for duplicate in matches[1:]:
+            cmds.deleteUI(duplicate)
+        return button
+    button = cmds.shelfButton(parent=current_shelf, **kwargs)
+    QFlatConfirmDialog.information(
+        None, "Success", title="Shelf button created",
+        message="You can now click the %s button on the shelf to launch the tool." % tool.title(),
+        closeButton=True,
+    )
+    return button
 
 
 def _fetch_repo_file(filename):
@@ -387,18 +396,13 @@ def _check_for_updates(ui, warning=True, force=False):
 
                 reload(updater)
 
-                command = "import aleha_tools.cams as cams\ncams.show()"
+                command = "import aleha_tools;aleha_tools.toggle()"
                 if not updater.install(ui.TITLE.lower(), command):
                     return
 
                 def _post_update():
                     import aleha_tools
-                    import aleha_tools.cams as cams
-                    from importlib import reload
-
-                    reload(aleha_tools)
-                    reload(cams)
-                    cams.show()
+                    aleha_tools.reload()
 
                     QFlatConfirmDialog.information(
                         None,

@@ -1,0 +1,1499 @@
+"""Shared Cams tooltip rendering and lifetime management, ported from TKM."""
+import sys
+import os
+import re
+import html
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+try:
+    from PySide6 import QtCore, QtGui, QtSvg, QtWidgets
+except ImportError:
+    from PySide2 import QtCore, QtGui, QtSvg, QtWidgets
+from . import util as wutil
+
+QSvgRenderer = getattr(QtSvg, "QSvgRenderer", None)
+DPI = wutil.DPI
+
+
+@dataclass(frozen=True)
+class TooltipMedia:
+    path: str
+
+
+def clean_tool_text(value):
+    return html.unescape(re.sub(r"<[^>]+>", "", str(value or ""))).strip()
+
+
+def _tooltip_parent():
+    try:
+        return wutil.get_maya_qt()
+    except (TypeError, RuntimeError):
+        return None
+
+
+def _enabled_setting():
+    value = QtCore.QSettings("Alehaaa", "Cams").value("show_tooltips", True)
+    return value is True or str(value).lower() in ("true", "1")
+
+
+def legacy_tooltip(template):
+    """Accept existing Cams XML templates while exposing structured content."""
+    try:
+        safe = re.sub(r"&(?!#?\w+;)", "&amp;", str(template))
+        safe = re.sub(r"(?i)<br\s*>", "<br/>", safe)
+        root = ET.fromstring("<root>" + safe + "</root>")
+        title, icon, body = "", None, []
+        for element in root:
+            text = "".join(element.itertext()).strip()
+            if element.tag == "title":
+                title = text
+            elif element.tag == "icon":
+                icon = text
+            elif element.tag in ("image", "img", "movie", "gif", "media"):
+                body.append(TooltipMedia(element.get("src") or text))
+            elif element.tag in ("separator", "hr"):
+                body.append(separator)
+            elif text:
+                body.append(text)
+        return Tooltip(str(template), title=title, icon=icon, body_lines=body)
+    except (ET.ParseError, ValueError, TypeError):
+        return Tooltip(str(template), body_lines=(clean_tool_text(template),))
+
+
+IS_MAC = sys.platform == "darwin"
+SHORTCUT_KEY_MAP = {
+    QtCore.Qt.Key_Alt: "⌥" if IS_MAC else "Alt",
+    QtCore.Qt.Key_Shift: "⇧" if IS_MAC else "Shift",
+    QtCore.Qt.Key_Control: "⌘" if IS_MAC else "Ctrl",
+    QtCore.Qt.MiddleButton: "Click" if IS_MAC else "MidClick",
+}
+SHORTCUT_KEY_ORDER = [QtCore.Qt.Key_Control, QtCore.Qt.Key_Alt, QtCore.Qt.Key_Shift, QtCore.Qt.MiddleButton]
+
+
+class TooltipStackManager(object):
+    """Arrange tooltip-like windows in independent per-anchor stacks."""
+
+    GAP = 6
+    EDGE_PADDING = 5
+    _entries = []
+
+    @classmethod
+    def _valid_entries(cls):
+        live = []
+        for window in cls._entries:
+            try:
+                if wutil.is_valid_widget(window):
+                    live.append(window)
+            except (RuntimeError, TypeError):
+                pass
+        cls._entries = live
+        return live
+
+    @classmethod
+    def register(cls, window, anchor_widget, anchor_rect, target_x=None):
+        cls.unregister(window, reflow=False)
+        window._stack_anchor_widget = anchor_widget
+        window._stack_anchor_rect = QtCore.QRect(anchor_rect)
+        window._stack_target_x = target_x if target_x is not None else anchor_rect.center().x()
+        cls._entries.append(window)
+        cls.reflow(anchor_widget)
+
+    @classmethod
+    def unregister(cls, window, reflow=True):
+        anchor = getattr(window, "_stack_anchor_widget", None)
+        cls._entries = [item for item in cls._valid_entries() if item is not window]
+        if reflow and anchor is not None:
+            cls.reflow(anchor)
+
+    @classmethod
+    def reflow(cls, anchor_widget):
+        group = [item for item in cls._valid_entries()
+                 if getattr(item, "_stack_anchor_widget", None) is anchor_widget]
+        if not group:
+            return
+        group.reverse()
+        newest = group[0]
+        anchor_rect = getattr(newest, "_stack_anchor_rect", None)
+        if anchor_rect is None:
+            return
+        target_x = getattr(newest, "_stack_target_x", anchor_rect.center().x())
+        screen = QtGui.QGuiApplication.screenAt(anchor_rect.center()) or QtGui.QGuiApplication.primaryScreen()
+        geo = screen.availableGeometry()
+        gap = wutil.DPI(cls.GAP)
+        edge = wutil.DPI(cls.EDGE_PADDING)
+        total_height = gap * max(0, len(group) - 1)
+        for index, window in enumerate(group):
+            window._set_stack_tail(index == 0, "bottom")
+            window.adjustSize()
+            total_height += window.height()
+        room_above = anchor_rect.top() - geo.top() - gap
+        room_below = geo.bottom() - anchor_rect.bottom() - gap
+        side = "bottom" if total_height <= room_above or room_above >= room_below else "top"
+        available_height = max(1, room_above if side == "bottom" else room_below)
+
+        # Fill the anchor column first, then wrap older tooltips into columns
+        # to its right whenever the available vertical space is exhausted.
+        columns = []
+        column = []
+        column_height = 0
+        for index, window in enumerate(group):
+            window._set_stack_tail(index == 0, side)
+            window.adjustSize()
+            height = window.height()
+            required = height + (gap if column else 0)
+            if column and column_height + required > available_height:
+                columns.append(column)
+                column = []
+                column_height = 0
+                required = height
+            column.append(window)
+            column_height += required
+        if column:
+            columns.append(column)
+
+        column_widths = [max(item.width() for item in items) for items in columns]
+        block_width = sum(column_widths) + gap * max(0, len(columns) - 1)
+        block_left = target_x - block_width // 2
+        block_left = max(geo.left() + edge, min(block_left, geo.right() - block_width - edge))
+
+        column_x = block_left
+        for column_index, items in enumerate(columns):
+            column_width = column_widths[column_index]
+            cursor_y = anchor_rect.top() - gap if side == "bottom" else anchor_rect.bottom() + 1 + gap
+            for window in items:
+                width, height = window.width(), window.height()
+                x = column_x + (column_width - width) // 2
+                if side == "bottom":
+                    y = cursor_y - height
+                    cursor_y = y - gap
+                else:
+                    y = cursor_y
+                    cursor_y = y + height + gap
+                window.move(x, y)
+                window.side = side
+                aw = wutil.DPI(getattr(window, "ARROW_W", 12))
+                window.arrow_x = max(
+                    aw / 2,
+                    min(target_x - x, width - aw / 2),
+                )
+                window.update()
+            column_x += column_width + gap
+
+    @classmethod
+    def clear(cls):
+        cls._entries = []
+
+    @classmethod
+    def close_all(cls, delete=False):
+        windows = list(cls._valid_entries())
+        cls._entries = []
+        app = QtWidgets.QApplication.instance() if delete else None
+        for window in windows:
+            try:
+                for timer_name in ("_auto_close_timer", "_tick_timer"):
+                    timer = getattr(window, timer_name, None)
+                    if timer is not None:
+                        timer.stop()
+                window.close()
+                if delete:
+                    # Tool windows parented to the toolbar must not survive
+                    # until Maya destroys its workspace control. Detach them
+                    # first, then flush their deferred deletion while their
+                    # Python classes and Qt parents are still valid.
+                    window.hide()
+                    window.setParent(None)
+                    window.deleteLater()
+                    if app is not None:
+                        QtWidgets.QApplication.sendPostedEvents(window, QtCore.QEvent.DeferredDelete)
+            except (RuntimeError, TypeError, AttributeError):
+                pass
+
+
+class Tooltip(str):
+    def __new__(cls, text, title="", body_lines=(), icon=None):
+        obj = str.__new__(cls, text)
+        obj.title = title
+        obj.body_lines = tuple(line for line in body_lines if line)
+        obj.icon = icon
+        return obj
+
+    @property
+    def first_line(self):
+        for line in self.body_lines:
+            if isinstance(line, str) and line.strip():
+                return line
+        return ""
+
+
+def _string_body_lines(raw):
+    lines = []
+    for line in str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        clean_line = clean_tool_text(line)
+        if clean_line:
+            lines.append(clean_line)
+    return tuple(lines)
+
+
+separator = object()
+
+
+class TooltipLink:
+    """A body line rendered as plain text, except for ``label`` inside it,
+    which is a clickable link that opens ``url``.
+
+    ``text`` is the full sentence; ``label`` is the substring within it that
+    becomes the link (matched once, left-to-right). If ``label`` isn't found
+    in ``text`` (or ``text`` is omitted), the whole ``label`` is the link.
+    """
+
+    __slots__ = ("url", "label", "text")
+
+    def __init__(self, url, label=None, text=None):
+        self.url = str(url)
+        self.label = str(label) if label else self.url
+        self.text = str(text) if text else self.label
+
+    def __str__(self):
+        return self.text
+
+
+def tooltip_body(*paragraphs):
+    lines = []
+    def _append(paragraph):
+        if paragraph is separator:
+            lines.append(paragraph)
+            return
+        if isinstance(paragraph, (TooltipMedia, TooltipLink)):
+            lines.append(paragraph)
+            return
+        if isinstance(paragraph, (list, tuple)):
+            for item in paragraph:
+                _append(item)
+            return
+        if paragraph and str(paragraph).strip():
+            lines.append(str(paragraph).strip())
+
+    for paragraph in paragraphs:
+        _append(paragraph)
+    return tuple(lines)
+
+
+def _tooltip_from_body(body):
+    body_lines = tooltip_body(*(body if isinstance(body, (list, tuple)) else [body]))
+    text_lines = []
+    for item in body_lines:
+        if item is separator:
+            text_lines.append("---")
+        elif isinstance(item, TooltipMedia):
+            text_lines.append(item.path)
+        elif isinstance(item, TooltipLink):
+            text_lines.append(item.text)
+        else:
+            text_lines.append(str(item))
+    return Tooltip("\n\n".join(line for line in text_lines if line), title="", body_lines=body_lines, icon=None)
+
+
+def _tooltip_from_data(raw, fallback_title="", fallback_description="", fallback_icon=None):
+    if isinstance(raw, Tooltip):
+        return raw
+
+    if isinstance(raw, (list, tuple)):
+        return _tooltip_from_body(raw)
+
+    # Fallback: plain string passed directly as tooltip content.
+    if isinstance(raw, str) and raw:
+        lines = list(_string_body_lines(raw))
+        if fallback_title and lines and lines[0].lower() == fallback_title.lower():
+            lines = lines[1:]
+        return Tooltip(raw, title="", body_lines=lines, icon=None)
+
+    if fallback_description:
+        return _tooltip_from_body(fallback_description)
+
+    return Tooltip("", title="", body_lines=(), icon=None)
+
+
+def format_tooltip_shortcut(keys_list, include_click_suffix=False):
+    keys_list = list(keys_list or [])
+    if not keys_list:
+        return ""
+
+    keys_set = set(keys_list)
+    parts = [SHORTCUT_KEY_MAP[key] for key in SHORTCUT_KEY_ORDER if key in keys_set]
+    seen_labels = set(parts)
+
+    if len(parts) < len(keys_set):
+        for key in keys_list:
+            if key in SHORTCUT_KEY_MAP:
+                continue
+            label = str(key)
+            if label in seen_labels:
+                continue
+            parts.append(label)
+            seen_labels.add(label)
+
+    if not parts:
+        return ""
+
+    separator = "" if IS_MAC else "+"
+    result = separator.join(parts)
+    if include_click_suffix:
+        return result + "+Click"
+    return result
+
+
+class QFlatTooltip(QtWidgets.QWidget):
+    """A floating tooltip with an arrow pointing to its source."""
+
+    BG_COLOR = "#333333"
+    HEADER_COLOR = "#282828"
+    TEXT_COLOR = "#bbbbbb"
+    LINK_COLOR = "#6fb1e0"
+    ARROW_W = 12
+    ARROW_H = 8
+    BORDER_RADIUS = 8
+
+    MAX_WIDTH = 320
+    MIN_WIDTH = 260
+    MEDIA_MAX_WIDTH = None
+    MEDIA_FIT_WIDTH = False
+
+    def __init__(
+        self,
+        text="",
+        anchor_widget=None,
+        icon=None,
+        shortcuts=None,
+        description=None,
+        tooltip=None,
+        icon_obj=None,
+        command_id=None,
+        command_label=None,
+        command_icon=None,
+        from_menu=False,
+        parent=None,
+        embedded=False,
+        template=None,
+    ):
+        QtWidgets.QWidget.__init__(self, parent if embedded else _tooltip_parent())
+        if tooltip is None and template is not None:
+            tooltip = legacy_tooltip(template)
+            text = text or tooltip.title
+            icon = icon or tooltip.icon
+        self.embedded = bool(embedded)
+        if self.embedded:
+            self.setWindowFlags(QtCore.Qt.Widget)
+        else:
+            window_type = QtCore.Qt.ToolTip if from_menu else QtCore.Qt.Tool
+            self.setWindowFlags(window_type | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+            self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+            self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+            self.setAttribute(QtCore.Qt.WA_NoMouseReplay)
+
+        self.anchor_widget = anchor_widget
+        self.shortcuts = shortcuts or []
+        self.icon_obj = icon_obj
+        self.command_id = command_id
+        self.command_label = command_label
+        self.command_icon = command_icon
+        # Hover/menu cleanup owns manager-created tooltips. Persistent callers
+        # (notably the debug stack) can opt out without changing stack layout.
+        self._managed_by_tooltip_manager = True
+        self.text = text
+        self.description = description
+        self.icon = icon  # Store for reference
+        self._shortcut_min_width = 0
+
+        self.tooltip = _tooltip_from_data(
+            tooltip,
+            fallback_title=text.strip() if text else "",
+            fallback_description=description.strip() if isinstance(description, str) else description,
+            fallback_icon=icon,
+        )
+
+        self._auto_close_timer = QtCore.QTimer(self)
+        self._auto_close_timer.setInterval(200)
+        self._auto_close_timer.timeout.connect(self._check_auto_close)
+        self._stack_tail_visible = True
+
+        self._setup_ui()
+
+    def _set_stack_tail(self, visible, side):
+        self._stack_tail_visible = bool(visible)
+        ah = wutil.DPI(self.ARROW_H) if visible else 0
+        self.main_layout.setContentsMargins(0, ah if side == "top" else 0, 0, ah if side == "bottom" else 0)
+        self.main_layout.activate()
+
+    def closeEvent(self, event):
+        self._auto_close_timer.stop()
+        TooltipStackManager.unregister(self)
+        QtWidgets.QWidget.closeEvent(self, event)
+
+    def _check_auto_close(self):
+        """Strictly manages tooltip visibility based on cursor location."""
+        if not wutil.is_valid_widget(self):
+            return
+        if not self.isVisible():
+            self._auto_close_timer.stop()
+            return
+
+        cursor_pos = QtGui.QCursor.pos()
+        tt_geo = self.frameGeometry()
+        side = getattr(self, "side", "bottom")
+
+        buffer = wutil.DPI(30)
+        if side == "top":
+            tt_safety = tt_geo.adjusted(-buffer, 0, buffer, buffer)
+        else:
+            tt_safety = tt_geo.adjusted(-buffer, -buffer, buffer, 0)
+
+        if tt_safety.contains(cursor_pos):
+            return
+
+        if getattr(self, "target_rect", None):
+            anc_geo = self.target_rect
+        elif self.anchor_widget and wutil.is_valid_widget(self.anchor_widget) and self.anchor_widget.isVisible():
+            anc_geo = self.anchor_widget.rect()
+            anc_geo.moveTo(self.anchor_widget.mapToGlobal(QtCore.QPoint(0, 0)))
+        else:
+            self.close()
+            return
+
+        if anc_geo.contains(cursor_pos):
+            return
+
+        if isinstance(self.anchor_widget, QtWidgets.QMenu):
+            active_popup = QtWidgets.QApplication.activePopupWidget()
+            if active_popup and active_popup.geometry().contains(cursor_pos):
+                return
+
+        bridge_l = max(anc_geo.left(), tt_geo.left())
+        bridge_r = min(anc_geo.right(), tt_geo.right())
+
+        if side == "top":
+            bridge_top, bridge_bot = anc_geo.bottom() - 1, tt_geo.top() + 1
+        else:
+            bridge_top, bridge_bot = tt_geo.bottom() - 1, anc_geo.top() + 1
+
+        bridge = QtCore.QRect(bridge_l, bridge_top, bridge_r - bridge_l, bridge_bot - bridge_top)
+        if bridge.contains(cursor_pos):
+            return
+
+        self.close()
+
+    def _setup_ui(self):
+        self.main_layout = QtWidgets.QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        self.main_layout.setSizeConstraint(QtWidgets.QVBoxLayout.SetMinAndMaxSize)
+        self.setStyleSheet(
+            "QFlatTooltip > QFrame#BgFrame {{ background-color: {}; border-radius: {}px; }}".format(
+                self.BG_COLOR, wutil.DPI(self.BORDER_RADIUS)
+            )
+        )
+
+        self.bg_frame = QtWidgets.QFrame()
+        self.bg_frame.setObjectName("BgFrame")
+        self.bg_frame.setMinimumWidth(wutil.DPI(self.MIN_WIDTH))
+        self.bg_frame.setMaximumWidth(wutil.DPI(self.MAX_WIDTH))
+        self.bg_layout = QtWidgets.QVBoxLayout(self.bg_frame)
+        self.bg_layout.setContentsMargins(0, 0, 0, 0)
+        self.bg_layout.setSpacing(0)
+        self.main_layout.addWidget(self.bg_frame)
+
+        self._build_content()
+
+    def _build_content(self):
+        self.has_header = False
+        header_title = getattr(self.tooltip, "title", "") or self.text
+        header_pixmap = self.icon_obj if self.icon_obj and not self.icon_obj.isNull() else None
+        body_items = tuple(getattr(self.tooltip, "body_lines", ()) or ())
+        if not body_items and self.description:
+            body_items = tooltip_body(self.description)
+        has_body = bool(body_items)
+        header_only = bool(header_title or header_pixmap) and not has_body and not self.shortcuts
+
+        if not header_pixmap:
+            if self.icon and isinstance(self.icon, (str, bytes)):
+                header_pixmap = QtGui.QIcon(self.icon)
+
+        if header_title or header_pixmap:
+            header_frame, header_layout = self._create_section_frame(
+                self.HEADER_COLOR,
+                rounded_top=True,
+                rounded_bottom=header_only,
+            )
+            if header_pixmap:
+                lbl = self._create_icon_label(header_pixmap, dim=22.5)
+                header_layout.addWidget(lbl)
+            if header_title:
+                title_lbl = self._create_text_label(header_title, size=18, bold=True, elide=True)
+                header_layout.addWidget(title_lbl)
+
+            header_layout.addStretch()
+            self._add_header_action_buttons(header_layout, header_title)
+            self.bg_layout.addWidget(header_frame)
+            self.has_header = True
+
+        content_layout = QtWidgets.QVBoxLayout()
+        content_layout.setSpacing(wutil.DPI(6))
+        top_margin = wutil.DPI(12)
+        content_layout.setContentsMargins(wutil.DPI(12), top_margin, wutil.DPI(12), wutil.DPI(8))
+        self.content_layout = content_layout
+
+        if has_body:
+            self._populate_body_content(content_layout, body_items)
+            self.bg_layout.addLayout(content_layout)
+            if self.shortcuts:
+                self.bg_layout.addSpacing(wutil.DPI(14))
+            else:
+                self.bg_layout.addSpacing(wutil.DPI(18))
+
+        if self.shortcuts:
+            self._build_shortcuts_section()
+
+    def _create_section_frame(self, color, rounded_top=False, rounded_bottom=False):
+        frame = QtWidgets.QFrame()
+        if rounded_top or rounded_bottom:
+            frame.setObjectName("TooltipHeaderFrame")
+            frame.setStyleSheet(
+                (
+                    "QFrame#TooltipHeaderFrame {{ background-color: {}; "
+                    "border-top-left-radius: {}px; border-top-right-radius: {}px; "
+                    "border-bottom-left-radius: {}px; border-bottom-right-radius: {}px; }}"
+                ).format(
+                    color,
+                    wutil.DPI(self.BORDER_RADIUS) if rounded_top else 0,
+                    wutil.DPI(self.BORDER_RADIUS) if rounded_top else 0,
+                    wutil.DPI(self.BORDER_RADIUS) if rounded_bottom else 0,
+                    wutil.DPI(self.BORDER_RADIUS) if rounded_bottom else 0,
+                )
+            )
+        else:
+            frame.setObjectName("TooltipSectionFrame")
+            frame.setStyleSheet("QFrame#TooltipSectionFrame {{ background-color: {}; }}".format(color))
+        layout = QtWidgets.QHBoxLayout(frame)
+        if rounded_top:
+            layout.setContentsMargins(wutil.DPI(10), wutil.DPI(8), wutil.DPI(8), wutil.DPI(8))
+            layout.setSpacing(wutil.DPI(6))
+        else:
+            layout.setContentsMargins(wutil.DPI(12), wutil.DPI(12), wutil.DPI(12), wutil.DPI(12))
+            layout.setSpacing(wutil.DPI(8))
+        return frame, layout
+
+    def _add_header_action_buttons(self, layout, header_title):
+        if self.command_id not in ("cams", "spaceswitch"):
+            return
+        layout.addWidget(self._create_header_button(
+            wutil.return_icon_path("add"), "Add to shelf", lambda: self._add_to_shelf(header_title)))
+
+    def _command_shortcut_text(self):
+        return ""
+
+    def _create_command_shortcut_label(self, shortcut_text, width):
+        label = QtWidgets.QLabel(shortcut_text)
+        label.setObjectName("TooltipCommandShortcutLabel")
+        label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        label.setContentsMargins(0, 0, wutil.DPI(3), 0)
+        label.setWordWrap(False)
+        label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        label.setToolTip(self.command_id or "")
+        font = label.font()
+        font.setPixelSize(wutil.DPI(9.5))
+        label.setFont(font)
+        label.setStyleSheet(
+            "#TooltipCommandShortcutLabel { color: #8c8c8c; background: transparent; padding: 0px; margin: 0px; }"
+        )
+        metrics = QtGui.QFontMetrics(label.font())
+        available_width = max(1, int(width or label.sizeHint().width()))
+        label.setFixedWidth(available_width)
+        label.setText(metrics.elidedText(shortcut_text, QtCore.Qt.ElideMiddle, available_width))
+        return label
+
+    def _create_header_button(self, icon_path, tooltip, callback):
+        btn = QtWidgets.QToolButton(self)
+        btn.setObjectName("TooltipHeaderButton")
+        btn.setAutoRaise(True)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+        btn.setToolTip(tooltip)
+        btn.setIcon(QtGui.QIcon(icon_path))
+        btn.setIconSize(QtCore.QSize(wutil.DPI(22), wutil.DPI(22)))
+        btn.setFixedSize(wutil.DPI(24), wutil.DPI(24))
+        btn.setStyleSheet(
+            "QToolButton#TooltipHeaderButton { background-color: transparent; border: none; border-radius: 0px; padding: 0px; }"
+            "QToolButton#TooltipHeaderButton:pressed { background-color: #1f1f1f; border: none; border-radius: 0px; }"
+        )
+        btn.clicked.connect(lambda _checked=False: callback())
+        return btn
+
+    def _create_body_link_label(self, link):
+        # A normal body-text label (same font/color/wrap as every other
+        # paragraph) except the one substring named by ``link.label`` is
+        # wrapped in a colored, underlined <a> -- so the line reads exactly
+        # like the rest of the tooltip, with only that word clickable.
+        import html as html_lib
+
+        escaped_text = html_lib.escape(link.text)
+        escaped_label = html_lib.escape(link.label)
+        anchor = '<a href="{0}" style="color:{1}; text-decoration:underline;">{2}</a>'.format(
+            html_lib.escape(link.url, quote=True), self.LINK_COLOR, escaped_label
+        )
+        html_text = escaped_text.replace(escaped_label, anchor, 1) if escaped_label in escaped_text else anchor
+
+        lbl = QtWidgets.QLabel(html_text)
+        lbl.setObjectName("TooltipLinkLabel")
+        lbl.setWordWrap(True)
+        lbl.setTextFormat(QtCore.Qt.RichText)
+        lbl.setOpenExternalLinks(False)
+        lbl.setTextInteractionFlags(QtCore.Qt.LinksAccessibleByMouse)
+        lbl.setMaximumWidth(self._body_max_width())
+        lbl.setStyleSheet(
+            "color: {0}; background: transparent; font-size: {1}px; margin: 0; padding: 0;".format(
+                self.TEXT_COLOR, wutil.DPI(10.5)
+            )
+        )
+        lbl.linkActivated.connect(self._open_link)
+        return lbl
+
+    @staticmethod
+    def _open_link(url):
+        QFlatTooltipManager.hide()
+        opened = False
+        try:
+            opened = bool(QtGui.QDesktopServices.openUrl(QtCore.QUrl(url)))
+        except (RuntimeError, AttributeError, TypeError, ValueError):
+            opened = False
+        if not opened:
+            import webbrowser
+
+            webbrowser.open(url, new=2)
+
+    def _open_hotkey_editor(self):
+        return None
+
+    def _add_to_shelf(self, header_title):
+        if self.command_id in ("cams", "spaceswitch"):
+            from . import updater
+            command = self.command_id
+            QFlatTooltipManager.hide()
+            updater.add_shelf_button(command)
+
+    def _build_shortcuts_section(self):
+        frame, layout = self._create_section_frame(self.HEADER_COLOR)
+        layout.setContentsMargins(0, wutil.DPI(4), 0, wutil.DPI(4))
+
+        title_lbl = self._create_text_label("Shortcuts", size=16, bold=True, elide=True, align=QtCore.Qt.AlignCenter)
+        title_lbl.setMinimumHeight(wutil.DPI(20))
+        layout.addWidget(title_lbl)
+
+        self.bg_layout.addSpacing(0)
+        self.bg_layout.addWidget(frame)
+        self.bg_layout.addSpacing(wutil.DPI(12))
+
+        max_row_width = 0
+        shortcut_font = self.font()
+        shortcut_font.setPixelSize(wutil.DPI(10.5))
+        shortcut_metrics = QtGui.QFontMetrics(shortcut_font)
+        shortcut_icon_dim = 11.25
+
+        for sh in self.shortcuts:
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(wutil.DPI(12), 0, wutil.DPI(12), 0)
+            row.setSpacing(wutil.DPI(20))
+
+            icon = sh.get("icon", "default")
+            row.addWidget(self._create_icon_label(icon, dim=shortcut_icon_dim))
+
+            label_text = sh.get("label", "")
+            name = QtWidgets.QLabel(label_text)
+            name.setWordWrap(False)
+            name.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Preferred)
+            name.setMinimumWidth(shortcut_metrics.horizontalAdvance(label_text))
+            name.setStyleSheet("color: {}; font-size: {}px;".format(self.TEXT_COLOR, wutil.DPI(10.5)))
+            row.addWidget(name)
+            row.addStretch()
+
+            command = sh.get("keys", "")
+            if isinstance(command, list):
+                command = format_tooltip_shortcut(command, include_click_suffix=True)
+            keys = QtWidgets.QLabel(command)
+            keys.setWordWrap(False)
+            keys.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Preferred)
+            keys.setMinimumWidth(shortcut_metrics.horizontalAdvance(command))
+            keys.setStyleSheet("color: {}; font-size: {}px;".format(self.TEXT_COLOR, wutil.DPI(10.5)))
+            row.addWidget(keys)
+            self.bg_layout.addLayout(row)
+            self.bg_layout.addSpacing(wutil.DPI(4))
+
+            row_width = (
+                wutil.DPI(shortcut_icon_dim)
+                + wutil.DPI(20)
+                + shortcut_metrics.horizontalAdvance(label_text)
+                + wutil.DPI(20)
+                + shortcut_metrics.horizontalAdvance(command)
+                + wutil.DPI(shortcut_icon_dim)
+            )
+            max_row_width = max(max_row_width, row_width)
+
+        self.bg_layout.addSpacing(wutil.DPI(18))
+        if max_row_width:
+            self._shortcut_min_width = min(max_row_width, wutil.DPI(460))
+            self.bg_frame.setMinimumWidth(max(self.bg_frame.minimumWidth(), self._shortcut_min_width))
+            self.bg_frame.setMaximumWidth(max(wutil.DPI(self.MAX_WIDTH), self._shortcut_min_width))
+
+    def _create_icon_label(self, source, dim=32):
+        lbl = QtWidgets.QLabel()
+        target_size = self._icon_target_size(dim)
+        if hasattr(source, "pixmap"):
+            pix = source.pixmap(target_size)
+        elif isinstance(source, (str, bytes)):
+            icon = source.decode() if isinstance(source, bytes) else source
+            pix = self._load_icon_pixmap(icon, target_size)
+        elif isinstance(source, QtGui.QPixmap):
+            pix = source.scaled(target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        else:
+            pix = QtGui.QPixmap()
+
+        if not pix.isNull():
+            lbl.setPixmap(pix)
+        return lbl
+
+    def _icon_target_size(self, dim):
+        px_dim = max(1, int(wutil.DPI(dim * 2)))
+        return QtCore.QSize(px_dim, px_dim)
+
+    def _load_icon_pixmap(self, path, target_size):
+        if not path:
+            return QtGui.QPixmap()
+        if not os.path.isfile(path):
+            path = wutil.return_icon_path(path)
+
+        if path.lower().endswith(".svg") and QSvgRenderer:
+            renderer = QSvgRenderer(path)
+            if renderer.isValid():
+                pixmap = QtGui.QPixmap(target_size)
+                pixmap.fill(QtCore.Qt.transparent)
+                painter = QtGui.QPainter(pixmap)
+                renderer.render(painter)
+                painter.end()
+                return pixmap
+
+        pixmap = QtGui.QPixmap(path)
+        if pixmap.isNull():
+            return pixmap
+        return pixmap.scaled(target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+
+    def _create_text_label(self, text, size=11, bold=False, elide=False, align=None):
+        lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("text_label")
+        lbl.setToolTip(text)
+        lbl.setWordWrap(True)
+
+        style = "#text_label {{ color: {0}; font-size: {1}px; {2}}}".format(
+            self.TEXT_COLOR, wutil.DPI(size), "font-weight: bold;" if bold else ""
+        )
+        lbl.setStyleSheet(style)
+        if align:
+            lbl.setAlignment(align)
+
+        if elide and " " not in text:
+            f = lbl.font()
+            f.setPixelSize(wutil.DPI(size))
+            f.setBold(bold)
+            fm = QtGui.QFontMetrics(f)
+            limit = wutil.DPI(self.MAX_WIDTH - 80)
+            if fm.horizontalAdvance(text) > limit:
+                lbl.setText(fm.elidedText(text, QtCore.Qt.ElideLeft, limit))
+                lbl.setWordWrap(False)
+        return lbl
+
+    def _body_max_width(self):
+        margins = self.content_layout.contentsMargins() if hasattr(self, "content_layout") else self.bg_layout.contentsMargins()
+        return max(1, self.bg_frame.maximumWidth() - margins.left() - margins.right())
+
+    def _contain_size(self, max_width, size):
+        if not size.isValid() or size.width() <= 0:
+            return None
+
+        if size.width() == max_width:
+            return size
+        if size.width() < max_width and not self.MEDIA_FIT_WIDTH:
+            return size
+
+        scale = float(max_width) / float(size.width())
+        return QtCore.QSize(max_width, max(1, int(size.height() * scale)))
+
+    def _create_media_label(self, path):
+        max_media_width = self._body_max_width()
+        if self.MEDIA_MAX_WIDTH is not None:
+            max_media_width = min(max_media_width, wutil.DPI(self.MEDIA_MAX_WIDTH))
+
+        if path.lower().endswith(".gif"):
+            # Imported here because customWidgets uses QFlatTooltipManager.
+            # Tooltip construction happens after both modules are initialized.
+            lbl = TooltipMovieWidget()
+            lbl.setMaximumWidth(max_media_width)
+            movie = QtGui.QMovie(path)
+            movie.setCacheMode(QtGui.QMovie.CacheAll)
+            movie.jumpToFrame(0)
+            frame_size = movie.currentImage().size()
+            if not frame_size.isValid():
+                frame_size = movie.frameRect().size()
+            contained_size = self._contain_size(max_media_width, frame_size)
+            movie.finished.connect(movie.start)
+            lbl.set_tooltip_movie(movie, display_size=contained_size)
+            movie.start()
+            lbl._movie = movie
+        else:
+            lbl = QtWidgets.QLabel()
+            lbl.setAlignment(QtCore.Qt.AlignCenter)
+            lbl.setMaximumWidth(max_media_width)
+            pix = QtGui.QPixmap(path)
+            if not pix.isNull():
+                contained_size = self._contain_size(max_media_width, pix.size())
+                if contained_size is not None and pix.size() != contained_size:
+                    pix = pix.scaled(contained_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+                lbl.setPixmap(pix)
+        return lbl
+
+    def _create_body_text_label(self, text):
+        raw_lbl = QtWidgets.QLabel(text)
+        raw_lbl.setWordWrap(True)
+        raw_lbl.setOpenExternalLinks(False)
+        raw_lbl.setTextFormat(QtCore.Qt.PlainText)
+        raw_lbl.setMaximumWidth(self._body_max_width())
+        raw_lbl.setStyleSheet(
+            "color: {}; background: transparent; font-size: {}px; margin: 0; padding: 0;".format(self.TEXT_COLOR, wutil.DPI(10.5))
+        )
+        return raw_lbl
+
+    def _create_separator(self):
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Plain)
+        line.setStyleSheet("background-color: #4a4a4a; color: #4a4a4a; border: none; min-height: 1px; max-height: 1px; margin: 0; padding: 0;")
+        return line
+
+    def _populate_body_content(self, layout, body_items):
+        for item in body_items:
+            if item is separator:
+                layout.addSpacing(wutil.DPI(6))
+                layout.addWidget(self._create_separator())
+                continue
+
+            if isinstance(item, TooltipMedia):
+                layout.addWidget(
+                    self._create_media_label(item.path),
+                    0,
+                    QtCore.Qt.AlignHCenter,
+                )
+                continue
+
+            if isinstance(item, TooltipLink):
+                layout.addWidget(self._create_body_link_label(item))
+                continue
+
+            layout.addWidget(self._create_body_text_label(str(item)))
+
+    def paintEvent(self, event):
+        if self.embedded:
+            return QtWidgets.QWidget.paintEvent(self, event)
+        if not self._stack_tail_visible:
+            return
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtCore.Qt.NoPen)
+
+        side = getattr(self, "side", "bottom")
+        painter.setBrush(QtGui.QColor(self.BG_COLOR))
+
+        aw = wutil.DPI(self.ARROW_W)
+        ah = wutil.DPI(self.ARROW_H)
+        ax = getattr(self, "arrow_x", self.width() / 2)
+
+        if side == "top":
+            poly = QtGui.QPolygonF([QtCore.QPointF(ax, 0), QtCore.QPointF(ax - aw / 2, ah + 1), QtCore.QPointF(ax + aw / 2, ah + 1)])
+            painter.drawPolygon(poly)
+        else:
+            poly = QtGui.QPolygonF(
+                [QtCore.QPointF(ax, self.height()), QtCore.QPointF(ax - aw / 2, self.height() - ah - 1), QtCore.QPointF(ax + aw / 2, self.height() - ah - 1)]
+            )
+            painter.drawPolygon(poly)
+
+    def show_around(self, widget, action_rect=None, target_rect=None, target_pos=None):
+        self.action_rect = action_rect
+        self.target_rect = target_rect
+        self.anchor_widget = widget
+
+        if target_rect:
+            self._global_anc = target_rect
+            cursor_pos = target_pos or QtGui.QCursor.pos()
+        elif action_rect:
+            try:
+                self._global_anc = QtCore.QRect(widget.mapToGlobal(action_rect.topLeft()), action_rect.size())
+            except RuntimeError:
+                return
+            self.target_rect = self._global_anc
+            cursor_pos = target_pos or QtGui.QCursor.pos()
+        else:
+            try:
+                target_global = widget.mapToGlobal(QtCore.QPoint(0, 0))
+            except RuntimeError:
+                return
+            self._global_anc = QtCore.QRect(target_global, widget.size())
+            self.target_rect = self._global_anc
+            cursor_pos = target_pos or QtGui.QCursor.pos()
+
+        # Calculate target_x based on cursor position, clamped to the anchor's horizontal bounds.
+        # This makes the tooltip (and arrow) "grow" from exactly where the user is hovering.
+        tx = cursor_pos.x()
+        if tx < self._global_anc.left():
+            tx = self._global_anc.left()
+        elif tx > self._global_anc.right():
+            tx = self._global_anc.right()
+        target_x = tx
+
+        self.adjustSize()
+        TooltipStackManager.register(self, widget, self._global_anc, target_x=target_x)
+        self._auto_close_timer.start()
+        self.show()
+
+
+class _TooltipMouseFilter(QtCore.QObject):
+    def __init__(self, manager):
+        QtCore.QObject.__init__(self)
+        self.manager = manager
+        self._pressed_button = None
+
+    def eventFilter(self, obj, event):
+        event_type = event.type()
+        unavailable_events = (QtCore.QEvent.Hide, QtCore.QEvent.Close, QtCore.QEvent.Destroy)
+        if event_type == QtCore.QEvent.ApplicationDeactivate or event_type in unavailable_events:
+            if event_type == QtCore.QEvent.ApplicationDeactivate:
+                self.manager.hide()
+            else:
+                self.manager.source_left(anchor_widget=obj, anchor_unavailable=True)
+            return False
+
+        if event_type in (QtCore.QEvent.MouseMove, QtCore.QEvent.HoverMove, QtCore.QEvent.Leave):
+            self.manager.validate_pointer()
+
+        tooltip = self.manager._current_tooltip
+        if not tooltip or not wutil.is_valid_widget(tooltip) or not tooltip.isVisible():
+            self._pressed_button = None
+            return False
+
+        if event_type not in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease, QtCore.QEvent.MouseButtonDblClick):
+            return False
+
+        global_pos = self._event_global_pos(event)
+        if global_pos is None or not tooltip.frameGeometry().contains(global_pos):
+            self._pressed_button = None
+            return False
+
+        target = self._tooltip_button_at(tooltip, global_pos)
+        if event_type == QtCore.QEvent.MouseButtonPress:
+            self._pressed_button = target
+            if isinstance(target, QtWidgets.QAbstractButton):
+                target.setDown(True)
+            return True
+
+        if event_type == QtCore.QEvent.MouseButtonRelease:
+            pressed = self._pressed_button
+            self._pressed_button = None
+            if isinstance(pressed, QtWidgets.QAbstractButton):
+                pressed.setDown(False)
+                if pressed is target and pressed.isEnabled():
+                    pressed.click()
+            elif pressed is not None and pressed is target:
+                # Not a button (e.g. a rich-text link label) -- replay a
+                # real press+release on it so Qt's own hit-testing (which
+                # anchor, if any, sits under the cursor) decides whether a
+                # link was actually clicked, instead of us reimplementing
+                # that here.
+                self._forward_mouse_click(pressed, event, global_pos)
+            return True
+
+        return True
+
+    @staticmethod
+    def _event_global_pos(event):
+        for method_name in ("globalPosition", "globalPos", "screenPos"):
+            method = getattr(event, method_name, None)
+            if not callable(method):
+                continue
+            pos = method()
+            to_point = getattr(pos, "toPoint", None)
+            if callable(to_point):
+                return to_point()
+            if pos is not None:
+                return QtCore.QPoint(int(pos.x()), int(pos.y()))
+        return None
+
+    @staticmethod
+    def _forward_mouse_click(widget, source_event, global_pos):
+        # Every real click on the tooltip is consumed above (return True)
+        # before Qt's normal per-widget dispatch ever runs, so a non-button
+        # interactive child (the link label) never gets its own mouse
+        # events. Deliver a synthetic press+release straight to the
+        # widget's own event() -- NOT QApplication.sendEvent(), which
+        # re-enters this same globally-installed filter and recurses
+        # infinitely -- to replay a normal click with no re-entrancy risk.
+        local_pos = widget.mapFromGlobal(global_pos)
+        button = source_event.button()
+        buttons = source_event.buttons()
+        modifiers = source_event.modifiers()
+        for event_type in (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease):
+            try:
+                forwarded = QtGui.QMouseEvent(
+                    event_type, QtCore.QPointF(local_pos), QtCore.QPointF(global_pos), button, buttons, modifiers
+                )
+            except TypeError:
+                forwarded = QtGui.QMouseEvent(event_type, local_pos, button, buttons, modifiers)
+            widget.event(forwarded)
+
+    @staticmethod
+    def _tooltip_button_at(tooltip, global_pos):
+        widget = tooltip.childAt(tooltip.mapFromGlobal(global_pos))
+        while widget and widget is not tooltip:
+            if isinstance(widget, QtWidgets.QAbstractButton):
+                return widget
+            if isinstance(widget, QtWidgets.QLabel) and bool(widget.textInteractionFlags() & QtCore.Qt.LinksAccessibleByMouse):
+                return widget
+            widget = widget.parentWidget()
+        return None
+
+
+class QFlatTooltipManager(object):
+    """Manages global state for QFlatTooltips ensuring only one exists at a time."""
+
+    _current_tooltip = None
+    _timer = None
+    _mouse_filter = None
+    _current_source_key = None
+    _pending_source_key = None
+    _pending_request = None
+    _request_serial = 0
+    # Initialize from persistence here so every tooltip-enabled surface starts
+    # with the same state, even when the main toolbar/settings button is absent.
+    enabled = _enabled_setting()
+
+    @classmethod
+    def is_active(cls):
+        visible = any(
+            isinstance(window, QFlatTooltip) and window.isVisible()
+            for window in TooltipStackManager._valid_entries()
+        )
+        return visible or (cls._timer and cls._timer.isActive())
+
+    @classmethod
+    def is_current_source(cls, source_key):
+        if source_key is None:
+            return False
+        if cls._current_tooltip and wutil.is_valid_widget(cls._current_tooltip) and cls._current_tooltip.isVisible() and cls._current_source_key == source_key:
+            return True
+        if cls._timer and cls._timer.isActive() and cls._pending_source_key == source_key:
+            return True
+        return False
+
+    @classmethod
+    def _clear_pending(cls):
+        cls._pending_source_key = None
+        cls._pending_request = None
+
+    @classmethod
+    def _ensure_mouse_filter(cls):
+        app = QtWidgets.QApplication.instance()
+        if not app:
+            return
+        if cls._mouse_filter is None:
+            cls._mouse_filter = _TooltipMouseFilter(cls)
+            app.installEventFilter(cls._mouse_filter)
+
+    @classmethod
+    def cancel_timer(cls):
+        cls._request_serial += 1
+        if cls._timer:
+            cls._timer.stop()
+        cls._clear_pending()
+
+    @classmethod
+    def _global_widget_rect(cls, widget):
+        if widget is None or not wutil.is_valid_widget(widget) or not widget.isVisible():
+            return None
+        try:
+            rect = widget.rect()
+            rect.moveTo(widget.mapToGlobal(QtCore.QPoint(0, 0)))
+            return rect
+        except (RuntimeError, ValueError, TypeError, AttributeError):
+            return None
+
+    @classmethod
+    def _request_contains_cursor(cls, request):
+        if not request:
+            return False
+        cursor_pos = QtGui.QCursor.pos()
+        target_rect = request.get("target_rect")
+        if callable(target_rect):
+            try:
+                target_rect = target_rect()
+            except Exception:
+                target_rect = None
+        if target_rect is not None:
+            try:
+                return bool(target_rect.contains(cursor_pos))
+            except (RuntimeError, ValueError, TypeError, AttributeError):
+                return False
+        anchor_rect = cls._global_widget_rect(request.get("anchor_widget"))
+        return bool(anchor_rect and anchor_rect.contains(cursor_pos))
+
+    @classmethod
+    def validate_pointer(cls):
+        if cls._timer and cls._timer.isActive() and not cls._request_contains_cursor(cls._pending_request):
+            cls.cancel_timer()
+        tooltip = cls._current_tooltip
+        if tooltip and wutil.is_valid_widget(tooltip) and tooltip.isVisible():
+            check_auto_close = getattr(tooltip, "_check_auto_close", None)
+            if callable(check_auto_close):
+                QtCore.QTimer.singleShot(0, check_auto_close)
+            else:
+                cls._current_tooltip = None
+                cls._current_source_key = None
+
+    @classmethod
+    def source_left(cls, source_key=None, anchor_widget=None, anchor_unavailable=False):
+        pending = cls._pending_request or {}
+        pending_matches = (
+            (source_key is not None and cls._pending_source_key == source_key)
+            or (anchor_widget is not None and pending.get("anchor_widget") is anchor_widget)
+        )
+        if pending_matches:
+            cls.cancel_timer()
+
+        tooltip = cls._current_tooltip
+        current_matches = bool(
+            tooltip
+            and (
+                (source_key is not None and cls._current_source_key == source_key)
+                or (
+                    anchor_widget is not None
+                    and getattr(tooltip, "anchor_widget", None) is anchor_widget
+                )
+            )
+        )
+        if not current_matches:
+            return
+        if anchor_unavailable:
+            cls.hide()
+            return
+        check_auto_close = getattr(tooltip, "_check_auto_close", None)
+        if callable(check_auto_close):
+            QtCore.QTimer.singleShot(0, check_auto_close)
+        else:
+            cls._current_tooltip = None
+            cls._current_source_key = None
+
+    @classmethod
+    def _close_managed_tooltips(cls):
+        """Close only hover tooltips, leaving intentional stack items alone."""
+        tooltips = [
+            window for window in TooltipStackManager._valid_entries()
+            if isinstance(window, QFlatTooltip)
+            and getattr(window, "_managed_by_tooltip_manager", True)
+        ]
+        for tooltip in tooltips:
+            try:
+                tooltip.close()
+                tooltip.deleteLater()
+            except Exception:
+                pass
+        cls._current_tooltip = None
+        cls._current_source_key = None
+
+    @classmethod
+    def hide(cls):
+        cls.cancel_timer()
+        cls._close_managed_tooltips()
+
+    @classmethod
+    def shutdown(cls):
+        """Tear down app-level state before an in-process module reload.
+
+        ``_mouse_filter`` is installed lazily, once, on Maya's persistent
+        QApplication (see ``_ensure_mouse_filter``) -- that registration
+        outlives ``aleha_tools.reload()``'s ``sys.modules`` purge, since
+        the QApplication itself is never recreated. Without this, every
+        reload leaves the previous filter installed forever (it keeps
+        receiving and acting on every application-wide mouse event, via a
+        ``cls`` reference to this now-orphaned class), while the freshly
+        re-imported module lazily installs one more on top of it the next
+        time a tooltip is shown -- one extra permanently-running filter
+        per reload, each still doing real per-event work.
+        """
+        cls.cancel_timer()
+        if cls._timer is not None:
+            try:
+                cls._timer.stop()
+            except Exception:
+                pass
+            cls._timer.deleteLater()
+            cls._timer = None
+        cls._timer_connection = None
+        app = QtWidgets.QApplication.instance()
+        if app is not None and cls._mouse_filter is not None:
+            try:
+                app.removeEventFilter(cls._mouse_filter)
+                cls._mouse_filter.deleteLater()
+            except Exception:
+                pass
+        cls._mouse_filter = None
+        cls._current_tooltip = None
+        cls._current_source_key = None
+        cls._clear_pending()
+        TooltipStackManager.close_all(delete=True)
+
+    @classmethod
+    def show(
+        cls,
+        text="",
+        anchor_widget=None,
+        icon=None,
+        shortcuts=None,
+        description=None,
+        tooltip=None,
+        action_rect=None,
+        icon_obj=None,
+        target_rect=None,
+        target_pos=None,
+        source_key=None,
+        command_id=None,
+        command_label=None,
+        command_icon=None,
+        **kwargs,
+    ):
+        if not cls.enabled:
+            return
+        if cls._timer:
+            cls._timer.stop()
+            cls._clear_pending()
+        if anchor_widget is not None and not wutil.is_valid_widget(anchor_widget):
+            return
+
+        cls._ensure_mouse_filter()
+        # ``show`` is the final ownership boundary. Defensively close any
+        # previous managed hover tooltip so direct callers cannot orphan a
+        # visible window in TooltipStackManager when replacing the manager's
+        # current pointer.
+        cls._close_managed_tooltips()
+
+        if not icon and command_icon:
+            icon = command_icon
+        if icon and not isinstance(icon, (str, bytes)):
+            icon_obj = icon
+            icon = None
+
+        if callable(target_pos):
+            target_pos = target_pos()
+
+        cls._current_source_key = source_key
+        cls._current_tooltip = QFlatTooltip(
+            text=text,
+            anchor_widget=anchor_widget,
+            icon=icon,
+            shortcuts=shortcuts,
+            description=description,
+            tooltip=tooltip,
+            template=kwargs.get("template"),
+            icon_obj=icon_obj,
+            command_id=command_id,
+            command_label=command_label,
+            command_icon=command_icon,
+            from_menu=isinstance(anchor_widget, QtWidgets.QMenu),
+        )
+        cls._current_tooltip.show_around(anchor_widget, action_rect, target_rect=target_rect, target_pos=target_pos)
+
+    @classmethod
+    def delayed_show(cls, delay=1200, **kwargs):
+        if not cls.enabled:
+            return
+        cls._ensure_mouse_filter()
+        kwargs.setdefault("source_key", "widget:{}".format(id(kwargs.get("anchor_widget"))))
+        source_key = kwargs.get("source_key")
+        if cls.is_current_source(source_key):
+            return
+        cls.cancel_timer()
+        # Match tool-button handoff semantics: as soon as a different source
+        # is hovered, its predecessor is gone. The new tooltip may still honor
+        # the normal delay, but it must never stack on the old hover tooltip.
+        if source_key != cls._current_source_key:
+            cls._close_managed_tooltips()
+
+        if not cls._timer:
+            cls._timer = QtCore.QTimer()
+            cls._timer.setSingleShot(True)
+
+        anchor = kwargs.get("anchor_widget")
+        cls._pending_source_key = source_key
+        cls._pending_request = dict(kwargs)
+        request_serial = cls._request_serial
+
+        def _safe_show():
+            if request_serial != cls._request_serial:
+                return
+            if anchor is not None and not wutil.is_valid_widget(anchor):
+                cls._clear_pending()
+                return
+            if not cls._request_contains_cursor(kwargs):
+                cls._clear_pending()
+                return
+            cls.show(**kwargs)
+
+        previous = getattr(cls, "_timer_connection", None)
+        if previous is not None:
+            try:
+                cls._timer.timeout.disconnect(previous)
+            except (RuntimeError, TypeError):
+                pass
+        cls._timer_connection = _safe_show
+        cls._timer.timeout.connect(_safe_show)
+        cls._timer.setInterval(delay)
+        cls._timer.start()
+
+
+def shutdown():
+    """Release tooltip timers, windows, and the application event filter."""
+    QFlatTooltipManager.shutdown()
+
+
+def parse_tt(tooltip):
+    if not tooltip:
+        return "", ""
+    normalized = _tooltip_from_data(tooltip)
+    header = clean_tool_text(getattr(normalized, "title", ""))
+    description = clean_tool_text(getattr(normalized, "first_line", ""))
+    return header, description
+
+
+class TooltipMovieLabel(QtWidgets.QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._movie = None
+        self._display_size = None
+        self.setAlignment(QtCore.Qt.AlignCenter)
+
+    def set_tooltip_movie(self, movie, display_size=None):
+        self._movie = movie
+        self._display_size = display_size if display_size and display_size.isValid() else None
+        if self._display_size is not None:
+            self.setFixedSize(self._display_size)
+        elif movie is not None:
+            frame_rect = movie.frameRect()
+            if frame_rect.isValid():
+                self.setFixedSize(frame_rect.size())
+        if movie is not None:
+            movie.frameChanged.connect(self._update_frame)
+            self._update_frame()
+
+    def _update_frame(self, *_):
+        if self._movie is None:
+            return
+        frame = self._movie.currentPixmap()
+        if frame.isNull():
+            return
+        if self._display_size is not None and frame.size() != self._display_size:
+            frame = frame.scaled(
+                self._display_size,
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation,
+            )
+        self.setPixmap(frame)
+
+class TooltipMovieWidget(QtWidgets.QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._movie = None
+        self._display_size = None
+        self._corner_radius = DPI(10)
+
+        self._movie_label = TooltipMovieLabel(self)
+        self._progress_track = QtWidgets.QFrame(self._movie_label)
+        self._progress_fill = QtWidgets.QFrame(self._progress_track)
+
+        self.setObjectName("tooltip_movie_widget")
+        self.setStyleSheet(
+            "#tooltip_movie_widget { background: transparent; border: none; border-radius: %dpx; }"
+            % self._corner_radius
+        )
+        self._movie_label.setStyleSheet("background: transparent; border: none;")
+        self._progress_track.setStyleSheet("background: transparent; border: none;")
+        self._progress_fill.setStyleSheet(
+            "background-color: rgba(192, 192, 192, 0.5); border: none;"
+        )
+        self._progress_track.setFixedHeight(DPI(2))
+        self._progress_fill.setFixedHeight(DPI(2))
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._movie_label)
+
+    def set_tooltip_movie(self, movie, display_size=None):
+        self._movie = movie
+        self._display_size = display_size if display_size and display_size.isValid() else None
+        self._movie_label.set_tooltip_movie(movie, display_size=display_size)
+        if self._display_size is not None:
+            self.setFixedWidth(self._display_size.width())
+        else:
+            self.setMinimumWidth(self._movie_label.width())
+        if movie is not None:
+            movie.frameChanged.connect(self._update_progress)
+            self._update_progress()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_rounded_mask()
+        self._layout_overlay()
+        self._update_progress()
+
+    def _apply_rounded_mask(self):
+        rect = self.rect()
+        if not rect.isValid():
+            return
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(rect), self._corner_radius, self._corner_radius)
+        region = QtGui.QRegion(path.toFillPolygon().toPolygon())
+        self.setMask(region)
+        self._movie_label.setMask(
+            region.translated(-self._movie_label.x(), -self._movie_label.y())
+        )
+
+    def _layout_overlay(self):
+        track_height = self._progress_track.height()
+        self._progress_track.setGeometry(
+            0,
+            max(0, self._movie_label.height() - track_height),
+            self._movie_label.width(),
+            track_height,
+        )
+        self._progress_track.raise_()
+        self._progress_fill.raise_()
+
+    def _update_progress(self, *_):
+        if self._movie is None:
+            self._progress_fill.setFixedWidth(0)
+            return
+
+        track_width = max(0, self._progress_track.width())
+        if track_width <= 0:
+            self._progress_fill.setFixedWidth(0)
+            return
+
+        frame_count = self._movie.frameCount()
+        current_frame = self._movie.currentFrameNumber()
+        if frame_count and frame_count > 1 and current_frame >= 0:
+            progress = float(current_frame) / float(frame_count - 1)
+        else:
+            progress = 0.0
+        fill_width = max(0, min(track_width, int(round(track_width * progress))))
+        self._progress_fill.setGeometry(0, 0, fill_width, self._progress_track.height())

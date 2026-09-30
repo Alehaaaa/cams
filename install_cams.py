@@ -105,7 +105,11 @@ def add_shelf_button():
     if not current_shelf:
         return
 
-    if not find_shelf_button(TOOL_NAME):
+    existing = find_shelf_button(TOOL_NAME)
+    if existing:
+        cmds.shelfButton(existing, edit=True, command="import {0}; {0}.toggle()".format(PACKAGE_NAME), sourceType="python")
+        return existing
+    if not existing:
         # Determine icon path
         scripts_dir = cmds.internalVar(userScriptDir=True)
         icon_path = os.path.join(scripts_dir, PACKAGE_NAME, "_icons", "{}.svg".format(TOOL_NAME))
@@ -114,7 +118,8 @@ def add_shelf_button():
             parent=current_shelf,
             image=str(icon_path),
             label=TOOL_NAME,
-            command="import {0}.{1} as {1}; {1}.show()".format(PACKAGE_NAME, TOOL_NAME),
+            command="import {0}; {0}.toggle()".format(PACKAGE_NAME),
+            sourceType="python",
             annotation="{0} by Aleha".format(TOOL_NAME.title()),
             imageOverlayLabel=TOOL_NAME[:4] if len(TOOL_NAME) > 4 else TOOL_NAME,
         )
@@ -216,7 +221,7 @@ def install():
     add_shelf_button()
 
     # Load the tool
-    cmds.evalDeferred("import {0}.{1} as {1}; {1}.show()".format(PACKAGE_NAME, TOOL_NAME), lowestPriority=True)
+    cmds.evalDeferred("import {0}; {0}.reload()".format(PACKAGE_NAME), lowestPriority=True)
 
     # Success Message
     msg = "{0} has been installed successfully!".format(TOOL_NAME.title())

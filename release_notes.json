@@ -1,5 +1,14 @@
 {
     "versions": {
+        "0.2.96beta": [
+            "SpaceSwitch: Ported the updated attribute switcher UI from TKM, preserving the pink color scheme.",
+            "SpaceSwitch: Added multi-selection and per-target switching with batched world-pose compensation and a single undo step.",
+            "SpaceSwitch: Added fast rotation-order conversion for plain rotation curves, with an evaluated fallback for other setups.",
+            "Cams: Ported TKM workspace docking, visibility, and reload handling while preserving the existing Cams layout.",
+            "Cams: Added Reload Cams to the System menu and improved shelf button reuse and cleanup of windows, timers, and callbacks.",
+            "Ported TKM tooltip styling, structured content, shortcuts, links, and media support with shared widget, action, and menu mixins.",
+            "Improved tooltip hover handoff, screen-aware placement, confirmation dialog ownership, and reload cleanup."
+        ],
         "0.2.95beta": [
             "Added UI toggle command.",
             "Improved UI instance handling.",

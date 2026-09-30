@@ -12,12 +12,14 @@ import os
 import sys
 import maya.OpenMayaUI as omui
 import maya.cmds as cmds
+from maya import mel
 from functools import partial
 from importlib import reload
 
 # Attempt to import PySide6, fallback to PySide2 if unavailable
 
 try:
+    from PySide6 import QtCore, QtWidgets
     from PySide6.QtWidgets import (  # type: ignore
         QWidget,
         QMainWindow,
@@ -45,6 +47,7 @@ try:
         QTimer,
     )
 except ImportError:
+    from PySide2 import QtCore, QtWidgets
     from PySide2.QtWidgets import (
         QWidget,
         QMainWindow,
@@ -75,22 +78,11 @@ except ImportError:
 # Maya-specific imports
 from maya.app.general.mayaMixin import MayaQWidgetDockableMixin
 
-# Remove outdated 'aleha_tools' modules except 'aleha_tools.cams'
-modules_to_delete = [m for m in list(sys.modules.keys()) if m.startswith("aleha_tools") and m != "aleha_tools.cams"]
+# Imports are side-effect free; explicit reload cleans up live UI first.
+import aleha_tools
+from . import settings, widgets, funcs, util, updater, lifecycle
 
-for mod_name in modules_to_delete:
-    del sys.modules[mod_name]
-
-# Import and reload necessary modules
-import aleha_tools  # type: ignore  # noqa: E402
-from . import settings, widgets, funcs, util, updater  # noqa: E402
-
-reload(aleha_tools)
-reload(settings)
-reload(widgets)
-reload(funcs)
-reload(util)
-reload(updater)
+WORKSPACE_CONTROL_NAME = lifecycle.WORKSPACE_CONTROL
 
 DATA = aleha_tools.DATA
 TITLE = DATA["TOOL"].title()
@@ -109,42 +101,35 @@ def welcome():
 
 
 def toggle():
-    global cams_aleha_tool
-    ctrl_name = TITLE + "WorkspaceControl"
-
-    # 1. Check if the control is currently visible (Safe Maya-native check)
-    if cmds.workspaceControl(ctrl_name, q=True, exists=True) and cmds.workspaceControl(ctrl_name, q=True, visible=True):
-        cmds.workspaceControl(ctrl_name, e=True, visible=False)
-        return
-
-    # 2. Try to re-show the existing instance if it's alive.
-    # Instead of checking isValid (which can be flaky during reloads), 
-    # we just try to call it and catch the "deleted" error.
-    try:
-        if cams_aleha_tool:
-            cams_aleha_tool.showWindow()
-            return
-    except (RuntimeError, AttributeError):
-        pass
-
-    # 3. Fallback: recreate the tool
+    window = lifecycle.get_window()
+    if window is not None:
+        if window.isVisible():
+            window.hide()
+            return False
+        window.showWindow()
+        return True
     show()
+    return True
 
 
 def show():
     global cams_aleha_tool
+    existing = lifecycle.get_window()
+    if existing is not None:
+        existing.showWindow()
+        cams_aleha_tool = existing
+        return existing
+    if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, exists=True):
+        lifecycle.cleanup(close_tools=False)
     try:
-        if cams_aleha_tool:
-            funcs.close_UI(cams_aleha_tool)
-    except (RuntimeError, AttributeError):
-        pass
-    try:
-        funcs.close_all_Windows()
+        cams_aleha_tool = QCamsWindow()
+        lifecycle.set_window(cams_aleha_tool)
+        cams_aleha_tool.showWindow()
+        return cams_aleha_tool
     except Exception:
-        pass
-
-    cams_aleha_tool = QCamsWindow()
-    cams_aleha_tool.showWindow()
+        lifecycle.cleanup(close_tools=False)
+        cams_aleha_tool = None
+        raise
 
 
 class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
@@ -154,7 +139,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.TITLE = TITLE
         self.VERSION = VERSION
 
-        super(QCamsWindow, self).__init__(parent=parent)
+        super().__init__(parent=parent)
 
         self.setWindowTitle(self.TITLE)
         self.setObjectName(self.TITLE)
@@ -164,6 +149,12 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
         self.setContextMenuPolicy(Qt.PreventContextMenu)
 
+        self._shutting_down = False
+        self._dock_widget = None
+        self._pending_restore_timers = []
+        self._dock_refresh_timer = QTimer(self)
+        self._dock_refresh_timer.setSingleShot(True)
+        self._dock_refresh_timer.timeout.connect(self._refresh_dock_ui)
         self.all_created_scriptjobs = []
         self.all_displayed_buttons = {}
 
@@ -248,115 +239,326 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         return QDialog.eventFilter(self, obj, event)
 
-    def visible_change_command(self, *args):
-        if not self.isDockable():
+    def _bind_dock_events(self):
+        dock_widget = self.parentWidget()
+        if dock_widget is None or dock_widget is self._dock_widget:
             return
-        if self.current_layout != cmds.workspaceLayoutManager(q=1, current=True):
-            self.current_layout = cmds.workspaceLayoutManager(q=1, current=True)
-            if not self.isVisible():
-                cmds.evalDeferred(show, lowestPriority=True)
+        self._disconnect_dock_widget_signals()
+        self._dock_widget = dock_widget
 
-                if self.shelf_painter:
-                    self.shelf_painter.show()
-                else:
-                    cmds.evalDeferred(self.shelf_tabbar, lowestPriority=True)
-                return
+        for signal_name in ("visibilityChanged", "topLevelChanged"):
+            signal = getattr(dock_widget, signal_name, None)
+            if signal is not None:
+                signal.connect(self._queue_dock_refresh)
 
-        if not self.isFloating():
-            workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
-            if cmds.workspaceControl(workspace_control, q=True, collapse=True):
-                timer = QTimer(self)
-                timer.setSingleShot(True)
-
-                timer.timeout.connect(
-                    partial(
-                        cmds.workspaceControl,
-                        workspace_control,
-                        e=True,
-                        collapse=False,
-                        tp=["west", 0],
-                    )
-                )
-                timer.start(100)
-
-            if util.is_valid_widget(self.dock_ui_btn, QPushButton):
-                self.dock_ui_btn.setHidden(True)
-
-            if self.shelf_painter:
-                self.shelf_painter.show()
-            else:
-                cmds.evalDeferred(self.shelf_tabbar, lowestPriority=True)
-        else:
-            if util.is_valid_widget(self.dock_ui_btn, QPushButton):
-                self.dock_ui_btn.setHidden(False)
-
-            if self.shelf_painter:
-                self.shelf_painter.hide()
-
-    def showWindow(self, dock=True):
-        # Using retain=True ensures the widget isn't deleted when the control is hidden
-        self.show(dockable=True, retain=True)
-
-        if dock:
-            self.dock_ui_btn.setHidden(True)
-            is_floating = self.isFloating()
-
-            # Build up kwargs for the workspaceControl command
-            kwargs = {
-                "e": True,
-                "visibleChangeCommand": self.visible_change_command,
-            }
-
-            # If it's floating and the referenced layout isn't visible, reset the position
-            if util.check_visible_layout(self.position[0]):
-                kwargs["dockToControl"] = self.position
-
-            # If it's floating, include the extra params
-            if is_floating:
-                kwargs["tp"] = ["west", 0]
-                kwargs["rsh"] = util.DPI(15)
-                kwargs["rsw"] = util.DPI(50)
-
-            # Make the workspaceControl call just once
-            workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
-            cmds.workspaceControl(workspace_control, **kwargs)
-
-            # cmds.evalDeferred(self.shelf_tabbar, lowestPriority=True)
-
-    #####################################################
-    # OLD LOGIC TO DRAW A CUSTOM NATIVE MAYA SHELF TABBAR
-    #####################################################
-
-    def shelf_tabbar(self):
+    def _bind_workspace_visible_change(self):
         try:
-            if self.shelf_painter:
-                QPainter(self.shelf_painter).end()
-                self.shelf_painter.setParent(None)
-                self.shelf_painter.deleteLater()
-
-                self.shelf_painter = None
-        except Exception:
+            if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, query=True, exists=True):
+                cmds.workspaceControl(
+                    WORKSPACE_CONTROL_NAME,
+                    edit=True,
+                    visibleChangeCommand=self.visible_change_command,
+                )
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
             pass
 
-        workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
-        qctrl = omui.MQtUtil.findControl(workspace_control)
-        control = util.get_maya_qt(qctrl)
+    @staticmethod
+    def _noop_visible_change_command(*_args):
+        pass
+
+    def _clear_workspace_visible_change(self):
         try:
-            tab_handle = control.parent().parent()
-        except Exception:
+            if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, query=True, exists=True):
+                # Keep the callback Python-typed while native Maya tears down.
+                cmds.workspaceControl(
+                    WORKSPACE_CONTROL_NAME,
+                    edit=True,
+                    visibleChangeCommand=self._noop_visible_change_command,
+                )
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+            pass
+
+    def _disconnect_dock_widget_signals(self):
+        dock_widget = getattr(self, "_dock_widget", None)
+        if dock_widget is not None and util.is_valid_widget(dock_widget):
+            for signal_name in ("visibilityChanged", "topLevelChanged"):
+                signal = getattr(dock_widget, signal_name, None)
+                if signal is not None:
+                    try:
+                        signal.disconnect(self._queue_dock_refresh)
+                    except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+                        pass
+        self._dock_widget = None
+
+    def _single_shot(self, delay_ms, callback):
+        if not self._is_active() or not callable(callback):
+            return None
+        timer = QtCore.QTimer(self)
+        timer.setSingleShot(True)
+        self._pending_restore_timers.append(timer)
+
+        def _run_callback():
+            if timer in self._pending_restore_timers:
+                self._pending_restore_timers.remove(timer)
+            try:
+                if self._is_active():
+                    callback()
+            finally:
+                try:
+                    timer.deleteLater()
+                except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+                    pass
+
+        timer.timeout.connect(_run_callback)
+        timer.start(int(delay_ms))
+        return timer
+
+    def _snapshot_anchor_layout(self):
+        target_widget = None
+        try:
+            target_name = self._dock_target_name(self.position[0])
+            target_pointer = omui.MQtUtil.findControl(target_name)
+            if target_pointer:
+                target_widget = util.get_maya_qt(target_pointer, QtWidgets.QWidget)
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+            target_widget = None
+
+        widgets = []
+        splitters = []
+        seen = set()
+        widget = target_widget
+        if widget is not None and util.is_valid_widget(widget):
+            widgets.append(
+                (
+                    widget,
+                    widget.height(),
+                    widget.minimumHeight(),
+                    widget.maximumHeight(),
+                )
+            )
+        while widget is not None and util.is_valid_widget(widget):
+            ident = id(widget)
+            if ident in seen:
+                break
+            seen.add(ident)
+            parent = widget.parentWidget()
+            if (
+                parent is not None
+                and util.is_valid_widget(parent)
+                and isinstance(parent, QtWidgets.QSplitter)
+                and parent.orientation() == QtCore.Qt.Vertical
+            ):
+                splitters.append((parent, list(parent.sizes())))
+            widget = parent
+
+        return {"widgets": widgets, "splitters": splitters}
+
+    @staticmethod
+    def _reapply_anchor_layout(snapshot):
+        if not snapshot:
+            return
+        for widget, height, minimum, maximum in snapshot.get("widgets", []):
+            if widget is None or not util.is_valid_widget(widget):
+                continue
+            try:
+                widget.setMinimumHeight(int(minimum))
+                widget.setMaximumHeight(int(maximum))
+                widget.resize(widget.width(), int(height))
+                widget.updateGeometry()
+            except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+                pass
+        for splitter, sizes in snapshot.get("splitters", []):
+            if splitter is None or not util.is_valid_widget(splitter):
+                continue
+            try:
+                splitter.setSizes(list(sizes))
+                splitter.updateGeometry()
+            except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+                pass
+
+    def _queue_dock_refresh(self, *_args):
+        if self._is_active():
+            self._dock_refresh_timer.start(0)
+
+    @staticmethod
+    def _dock_target_name(layout):
+        component_names = {
+            "TimeSlider": "Time Slider",
+            "RangeSlider": "Range Slider",
+            "Shelf": "Shelf",
+        }
+        component = component_names.get(layout)
+        if component:
+            return mel.eval('getUIComponentToolBar("{}", false)'.format(component))
+        return layout
+
+    def visible_change_command(self, *_args):
+        if not self._is_active() or not self.isDockable():
+            return
+
+        try:
+            is_visible = cmds.workspaceControl(
+                WORKSPACE_CONTROL_NAME, query=True, visible=True
+            )
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+            return
+
+        if not is_visible:
+            self._delete_tabbar_painter()
             return
 
         if self.isFloating():
-            tab_handle.tabBar().setVisible(False)
+            if self.shelf_painter and util.is_valid_widget(self.shelf_painter):
+                self.shelf_painter.hide()
+            self._dock_refresh_timer.start(0)
             return
 
-        self.shelf_painter = widgets.QFlatShelfPainter(tab_handle)
-        self.shelf_painter.setGeometry(tab_handle.geometry())
-        self.shelf_painter.updateDrawingParameters(tabbar_width=tab_handle.tabBar().geometry())
-        self.shelf_painter.move(tab_handle.tabBar().pos())
+        try:
+            is_collapsed = cmds.workspaceControl(
+                WORKSPACE_CONTROL_NAME, query=True, collapse=True
+            )
+        except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+            is_collapsed = False
 
-        self.shelf_painter.show()
-        tab_handle.tabBar().setVisible(True)
+        if is_collapsed:
+            anchor_snapshot = self._snapshot_anchor_layout()
+
+            def _restore_workspace_tab():
+                if not self._is_active():
+                    return
+                try:
+                    if cmds.workspaceControl(WORKSPACE_CONTROL_NAME, query=True, exists=True):
+                        cmds.workspaceControl(
+                            WORKSPACE_CONTROL_NAME,
+                            edit=True,
+                            collapse=False,
+                            tabPosition=("west", 0),
+                        )
+                except (RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
+                    return
+                self._queue_dock_refresh()
+                self._reapply_anchor_layout(anchor_snapshot)
+                self._single_shot(0, lambda: self._reapply_anchor_layout(anchor_snapshot))
+                self._single_shot(100, lambda: self._reapply_anchor_layout(anchor_snapshot))
+
+            self._single_shot(100, _restore_workspace_tab)
+
+        self._queue_dock_refresh()
+
+    def _parent_to_dock_target(self):
+        """Let Maya create the workspace under the requested native dock."""
+        target_name = self._dock_target_name(self.position[0])
+        pointer = omui.MQtUtil.findControl(target_name)
+        if not pointer:
+            return False
+        target = util.get_maya_qt(pointer, QtWidgets.QWidget)
+        if target is None or not util.is_valid_widget(target):
+            return False
+        dock_parent = next(
+            (child for child in target.findChildren(QtWidgets.QWidget) if not child.objectName()),
+            None,
+        )
+        if dock_parent is None:
+            return False
+        self.setParent(dock_parent)
+        return True
+
+    def showWindow(self, dock=True):
+        if not self._is_active():
+            return False
+        if not self.isDockable():
+            parented = dock and self._parent_to_dock_target()
+            if parented:
+                self.show(dockable=True, floating=False, area=self.position[1], retain=False)
+            else:
+                # A saved dock may be absent from this Maya workspace.
+                self.show(dockable=True, floating=True, retain=False)
+            if not self.isDockable():
+                raise RuntimeError("Maya did not create the Cams workspace control")
+        else:
+            # Reopening must preserve the dock chosen by the user in Maya.
+            self.show()
+        self._bind_dock_events()
+        self._bind_workspace_visible_change()
+        self._queue_dock_refresh()
+        return True
+
+
+    def _is_active(self):
+        return util.is_valid_widget(self) and not self._shutting_down
+
+    def _delete_tabbar_painter(self):
+        painter, self.shelf_painter = self.shelf_painter, None
+        if painter is not None and util.is_valid_widget(painter):
+            painter.hide()
+            painter.deleteLater()
+
+    def _refresh_dock_ui(self):
+        if not self._is_active():
+            return
+        floating = self.isFloating()
+        self.dock_ui_btn.setVisible(floating)
+        if not self.isVisible() or floating:
+            self._delete_tabbar_painter()
+            return
+        self.shelf_tabbar()
+
+    def hideEvent(self, event):
+        self._delete_tabbar_painter()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, "_dock_refresh_timer"):
+            self._queue_dock_refresh()
+
+    def _begin_shutdown(self):
+        if self._shutting_down:
+            return
+        if lifecycle.get_window() is self:
+            lifecycle.set_window(None)
+        self._shutting_down = True
+        self._clear_workspace_visible_change()
+        self._dock_refresh_timer.stop()
+        for timer in self._pending_restore_timers:
+            if util.is_valid_widget(timer):
+                timer.stop()
+                timer.deleteLater()
+        self._pending_restore_timers = []
+        self._disconnect_dock_widget_signals()
+        self._delete_tabbar_painter()
+        self.kill_all_scriptJobs()
+
+    def closeEvent(self, event):
+        self._begin_shutdown()
+        super().closeEvent(event)
+
+    def shelf_tabbar(self):
+        if not self._is_active() or self.isFloating():
+            self._delete_tabbar_painter()
+            return False
+        pointer = omui.MQtUtil.findControl(WORKSPACE_CONTROL_NAME)
+        if not pointer:
+            return False
+        control = util.get_maya_qt(pointer, QtWidgets.QWidget)
+        tab_handle = control.parentWidget() if control else None
+        while tab_handle is not None and not isinstance(tab_handle, QtWidgets.QTabWidget):
+            tab_handle = tab_handle.parentWidget()
+        if tab_handle is None:
+            self._delete_tabbar_painter()
+            return False
+        tab_bar = tab_handle.tabBar()
+        if self.shelf_painter and util.is_valid_widget(self.shelf_painter):
+            if self.shelf_painter.parentWidget() is tab_bar:
+                self.shelf_painter.show()
+                self.shelf_painter.sync_geometry()
+                return True
+            self._delete_tabbar_painter()
+        if tab_handle.tabPosition() != QtWidgets.QTabWidget.West:
+            tab_handle.setTabPosition(QtWidgets.QTabWidget.West)
+        tab_bar.show()
+        self.shelf_painter = widgets.QFlatShelfPainter(tab_bar, tab_handle)
+        return True
 
     #####################################################
 
@@ -575,6 +777,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.menu_bar.setCornerWidget(self.dock_ui_btn)
         self.main_layout.setMenuBar(self.menu_bar)
 
+
     def _create_dock_menu(self):
         self.dock_menu = widgets.QFlatMenu("Dock Window")
         self.dock_menu.setIcon(QIcon(util.return_icon_path("dock")))
@@ -625,6 +828,10 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         system_menu = widgets.QFlatOpenMenu("System")
         system_menu.setIcon(QIcon(util.return_icon_path("system")))
         system_menu.setTearOffEnabled(True)
+        reload_action = system_menu.addAction(
+            "Reload Cams", description="Clean up Cams windows and callbacks, then load the latest code."
+        )
+        reload_action.triggered.connect(lambda: cmds.evalDeferred(aleha_tools.reload))
 
         self.startup_run_Cams_checkbox = system_menu.addAction(
             "Run Cams on Startup", description="Automatically launch the Cams UI whenever Maya opens."
@@ -714,9 +921,6 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
     def _run_spaceswitch(self):
         try:
             from aleha_tools import spaceswitch
-            from importlib import reload
-
-            reload(spaceswitch)
             spaceswitch.show()
 
             dlg = spaceswitch._MAIN_DICT.get("_SPACESWITCH_INSTANCE")
@@ -730,6 +934,8 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             cmds.warning("Error running SpaceSwitch: {}".format(e))
 
     def _check_spaceswitch_shelf(self):
+        if not self._is_active() or lifecycle._CLEANING_UP:
+            return
         if self.startup_prefs.get("spaceswitch_dont_ask_shelf", False):
             return
 
@@ -884,10 +1090,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
                 hud.apply_selection(pres[list(pres.keys())[sel]])
 
         if not self.skip_update:
-            cmds.evalDeferred(
-                partial(funcs.check_for_updates, self, warning=False),
-                lowestPriority=True,
-            )
+            self._single_shot(0, partial(funcs.check_for_updates, self, warning=False))
 
     def set_scene_preferences(self):
         if self.startup_viewport:
@@ -906,45 +1109,24 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
                     cmds.setAttr(icon_attr, util.return_icon_path(cams_type), type="string")
 
     def dock_to_ui(self, layout=None, orient=None):
-        docked = True
-
-        if not layout:
-            layout_name = self.dock_ac_group.checkedAction().text()
-            index = list(self.docking_layouts.values()).index(layout_name)
-            layout = list(self.docking_layouts.keys())[index]
-        if not orient:
-            orient_name = self.pos_ac_group.checkedAction().text()
-            index = list(self.docking_orients.values()).index(orient_name)
-            orient = list(self.docking_orients.keys())[index]
-
-        # Enable / Disable actions
-        self.pos_ac_group.checkedAction().setEnabled(False)
-        self.dock_ac_group.checkedAction().setEnabled(False)
-
-        for group in [self.pos_ac_group, self.dock_ac_group]:
+        layout = layout or self.position[0]
+        orient = orient or self.position[1]
+        if layout not in self.docking_layouts or orient not in self.docking_orients:
+            return False
+        if not util.check_visible_layout(layout):
+            return False
+        self._delete_tabbar_painter()
+        cmds.workspaceControl(WORKSPACE_CONTROL_NAME, edit=True,
+            dockToControl=(self._dock_target_name(layout), orient),
+            tabPosition=("west", 0), visibleChangeCommand=self.visible_change_command)
+        self.process_prefs(position=[layout, orient])
+        for group, chosen in ((self.dock_ac_group, self.docking_layouts[layout]),
+                              (self.pos_ac_group, self.docking_orients[orient])):
             for action in group.actions():
+                action.setChecked(action.text() == chosen)
                 action.setEnabled(not action.isChecked())
-
-        # Build up kwargs for the workspaceControl command
-        kwargs = {
-            "e": True,
-            "visibleChangeCommand": self.visible_change_command,
-            "tp": ["west", 0],
-            "rsw": util.DPI(200),
-            "rsh": util.DPI(15),
-        }
-
-        if util.check_visible_layout(self.position[0]):
-            kwargs["dockToControl"] = [layout, orient]
-
-            self.process_prefs(position=[layout, orient])
-            docked = False
-
-        # Make the workspaceControl call just once
-        workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
-        cmds.workspaceControl(workspace_control, **kwargs)
-
-        return docked
+        self._queue_dock_refresh()
+        return True
 
     def add_presets(self):
         if not util.is_valid_widget(self.menu_presets):
@@ -1166,6 +1348,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         _coffee = widgets.QAboutDialog.showUI(self, data=DATA)
         _coffee._check_updates.connect(lambda: funcs.check_for_updates(self))
 
+
     def resizeEvent(self, event):
         def get_qt():
             workspace_control = self.parent().objectName() if self.parent() else self.objectName() + "WorkspaceControl"
@@ -1213,7 +1396,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         if shape_type == "camera":
             self.reload_cams_UI()
-            cmds.scriptJob(nodeDeleted=[new_camera, self.reload_cams_UI])
+            self.all_created_scriptjobs.append(cmds.scriptJob(nodeDeleted=[new_camera, self.reload_cams_UI]))
 
     def set_selection_style(self, button, selected=False):
         if selected:
@@ -1248,7 +1431,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.set_scene_preferences()
 
     def menuchanged_scripjob(self):
-        cmds.evalDeferred(cmds.evalDeferred(show, lowestPriority=True), lowestPriority=True)
+        self._queue_dock_refresh()
 
     def add_scriptjobs(self):
         for cam in util.get_cameras():
@@ -1280,5 +1463,4 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.all_created_scriptjobs = []
 
     def dockCloseEventTriggered(self):
-        funcs.close_all_Windows(self.objectName())
-        self.kill_all_scriptJobs()
+        self._begin_shutdown()

@@ -11,6 +11,7 @@ from maya import OpenMayaUI as omui
 
 try:
     PYSIDE_VERSION = 6
+    from PySide6 import QtCore, QtGui, QtWidgets
     from PySide6.QtWidgets import (
         QWidget,
         QHBoxLayout,
@@ -38,6 +39,7 @@ try:
     from PySide6.QtCore import Qt, QPointF, QPoint, QTimer, QSettings, QSize, QRectF
 except ImportError:
     PYSIDE_VERSION = 2
+    from PySide2 import QtCore, QtGui, QtWidgets
     from PySide2.QtWidgets import (
         QWidget,
         QHBoxLayout,
@@ -300,7 +302,7 @@ class UndoDisabled(object):
     def __exit__(self, exc_type, exc, tb):
         if self.previous_state is not None:
             try:
-                cmds.undoInfo(state=self.previous_state)
+                cmds.undoInfo(stateWithoutFlush=self.previous_state)
             except Exception:
                 pass
         return False
@@ -332,6 +334,8 @@ class ProgressBar(object):
 
     def __enter__(self):
         try:
+            if cmds.about(batch=True):
+                return self
             self.ctrl = mel.eval("$tmp = $gMainProgressBar")
             cmds.progressBar(
                 self.ctrl,
@@ -577,6 +581,7 @@ class SwitchEntry(object):
         return {
             "enum": self.values,
             "marked": self.marked,
+            "keyed_values": sorted(Maya.keyed_values(self.attr_node, self.attr)),
             "current": self.current,
             "attr": self.attr,
             "type": self.attr_type,
@@ -704,6 +709,103 @@ class SwitchCatalogBuilder(object):
 
         return data
 
+    @staticmethod
+    def _downstream_nodes(source):
+        """Return direct DG destinations for a node or plug."""
+        try:
+            return cmds.listConnections(
+                source,
+                source=False,
+                destination=True,
+                skipConversionNodes=True,
+            ) or []
+        except (TypeError, RuntimeError, ValueError):
+            try:
+                return cmds.listConnections(
+                    source, source=False, destination=True
+                ) or []
+            except Exception:
+                return []
+
+    @staticmethod
+    def _is_transform(node):
+        try:
+            return cmds.nodeType(node) in ("transform", "joint")
+        except Exception:
+            return False
+
+    @classmethod
+    def _controller_descendants(cls, root, max_depth=8):
+        """Find the nearest curve controller below a driven transform."""
+        queue = [(root, 0)]
+        visited = set()
+        matches = []
+        nearest_depth = None
+        while queue:
+            node, depth = queue.pop(0)
+            if node in visited or depth > max_depth:
+                continue
+            visited.add(node)
+            try:
+                shapes = cmds.listRelatives(
+                    node,
+                    shapes=True,
+                    noIntermediate=True,
+                    fullPath=True,
+                ) or []
+            except Exception:
+                shapes = []
+            if any(
+                cmds.nodeType(shape) == "nurbsCurve"
+                for shape in shapes
+            ):
+                if nearest_depth is None:
+                    nearest_depth = depth
+                if depth == nearest_depth:
+                    matches.append(node)
+                continue
+            if nearest_depth is not None or depth == max_depth:
+                continue
+            try:
+                children = cmds.listRelatives(
+                    node, children=True, type="transform", fullPath=True
+                ) or []
+            except Exception:
+                children = []
+            queue.extend((child, depth + 1) for child in children)
+        return matches
+
+    @classmethod
+    def detect_xform_target(cls, switch_node, attribute, max_nodes=256):
+        """Infer the control whose world pose a switch should preserve.
+
+        Space-switch attributes often live on a settings/spacer control while
+        their DG output drives an offset group above the animated control. Walk
+        only downstream from the switch plug, stop at driven transforms, and
+        use a unique nearest curve-controller descendant. Ambiguous networks
+        deliberately fall back to the attribute owner.
+        """
+        plug = "{}.{}".format(switch_node, attribute)
+        queue = list(cls._downstream_nodes(plug))
+        visited = set()
+        driven = []
+        while queue and len(visited) < max_nodes:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            if cls._is_transform(node):
+                driven.append(node)
+                continue
+            queue.extend(cls._downstream_nodes(node))
+
+        candidates = []
+        for transform in driven:
+            controls = cls._controller_descendants(transform)
+            candidates.extend(controls or [transform])
+        candidates = list(dict.fromkeys(candidates))
+        return candidates[0] if len(candidates) == 1 else switch_node
+
     def local_catalog(self, selection):
         catalog = {}
 
@@ -764,11 +866,11 @@ class SwitchCatalogBuilder(object):
                 current = Maya.get_float(node, attr)
                 gimbal = {}
 
-                if catalog_key == "rotateOrder" and self.show_rotate_order:
-                    gimbal = self.analyzer.analyze(node)
+                # Gimbal analysis is deferred until an option picker opens.
 
+                xform_target = node if attr == "rotateOrder" else self.detect_xform_target(node, attr)
                 entry = SwitchEntry(
-                    display_object=node,
+                    display_object=xform_target,
                     attr_node=node,
                     attr=attr,
                     values=values,
@@ -776,7 +878,7 @@ class SwitchCatalogBuilder(object):
                     attr_type=attr_type,
                     min_value=min_value,
                     max_value=max_value,
-                    xform_target=node,
+                    xform_target=xform_target,
                     source="local",
                     marked=Maya.keyed_values(node, attr, current),
                     gimbal=gimbal,
@@ -963,6 +1065,7 @@ class Grip(QSizeGrip):
 class FloatingWidget(base_widgets.QFlatDialog):
     BORDER_RADIUS = util.DPI(5)
     AUTO_CLOSE_DIST = util.DPI(10)
+    AUTO_CLOSE_GRACE_MS = 400
     TEXT_COLOR = COLOR_TEXT_SECONDARY
 
     def __init__(self, popup=False, parent=None):
@@ -978,7 +1081,9 @@ class FloatingWidget(base_widgets.QFlatDialog):
         self._auto_close_active = True if popup else None
 
         self._auto_close_timer = QTimer(self)
-        self._auto_close_timer.setSingleShot(True)
+        self._auto_close_armed = False
+        self._auto_close_origin = None
+        self._shown_elapsed = QtCore.QElapsedTimer()
         self._auto_close_timer.setInterval(200)
         self._auto_close_timer.timeout.connect(self._process_auto_close_request)
 
@@ -1026,37 +1131,68 @@ class FloatingWidget(base_widgets.QFlatDialog):
         self.move(x, y)
 
     def _is_cursor_within_bounds(self):
-        cursor = QCursor.pos()
+        """Geometric intersection check for the main widget and its active sub-popups."""
+        cursor_pos = QtGui.QCursor.pos()
+        if not util.is_valid_widget(self):
+            return False
 
-        if util.is_valid_widget(self) and self.frameGeometry().contains(cursor):
+        if self.frameGeometry().contains(cursor_pos):
             return True
 
-        popup = getattr(self, "_active_popup", None)
-
-        if popup and util.is_valid_widget(popup) and popup.isVisible():
-            return popup.frameGeometry().contains(cursor)
-
+        if (
+            hasattr(self, "_active_popup")
+            and self._active_popup
+            and util.is_valid_widget(self._active_popup)
+            and self._active_popup.isVisible()
+        ):
+            if self._active_popup.frameGeometry().contains(cursor_pos):
+                return True
+        if (
+            hasattr(self, "_multi_switch_dialog")
+            and self._multi_switch_dialog
+            and util.is_valid_widget(self._multi_switch_dialog)
+            and self._multi_switch_dialog.isVisible()
+        ):
+            if self._multi_switch_dialog.frameGeometry().contains(cursor_pos):
+                return True
         return False
 
     def _process_auto_close_request(self):
+        """Evaluates whether the window should close based on current cursor position."""
         if not self._auto_close_active or not self.isVisible():
+            self._auto_close_timer.stop()
             return
 
+        if not self._shown_elapsed.isValid():
+            return
+        remaining_grace = self.AUTO_CLOSE_GRACE_MS - self._shown_elapsed.elapsed()
+        if remaining_grace > 0:
+            return
+
+        cursor_pos = QtGui.QCursor.pos()
         if self._is_cursor_within_bounds():
+            self._auto_close_armed = True
             return
 
-        cursor = QCursor.pos()
         bounds = self.frameGeometry()
+        cursor_distance = self._distance_from_rect(cursor_pos, bounds)
+        allowed_distance = self.AUTO_CLOSE_DIST
+        if not self._auto_close_armed and self._auto_close_origin is not None:
+            # Toolbar popups intentionally open offset from the click. Use that
+            # stable launch distance as the pre-interaction baseline, so an
+            # untouched popup stays open while movement farther away closes it.
+            allowed_distance += self._distance_from_rect(
+                self._auto_close_origin, bounds
+            )
 
-        dx = max(bounds.left() - cursor.x(), 0, cursor.x() - bounds.right())
-        dy = max(bounds.top() - cursor.y(), 0, cursor.y() - bounds.bottom())
-
-        if (dx * dx + dy * dy) > (self.AUTO_CLOSE_DIST * self.AUTO_CLOSE_DIST):
+        if cursor_distance > allowed_distance:
             self.close()
 
     def _resume_auto_close(self):
-        if self._auto_close_active is True and not self._is_cursor_within_bounds():
-            self._auto_close_timer.start()
+        """Resume distance monitoring after a temporary interaction pause."""
+        if self._auto_close_active is False:
+            self._auto_close_active = True
+        self._ensure_auto_close_monitor()
 
     def _suspend_auto_close(self):
         if self._auto_close_active is True:
@@ -1066,19 +1202,21 @@ class FloatingWidget(base_widgets.QFlatDialog):
             self._auto_close_timer.stop()
 
     def _disable_auto_close(self):
-        if self._auto_close_timer:
+        """Permanently stops the auto-close mechanism for the lifetime of the widget."""
+        if hasattr(self, "_auto_close_timer") and self._auto_close_timer:
             self._auto_close_timer.stop()
-
         self._auto_close_active = None
+        self._auto_close_armed = False
+        self._auto_close_origin = None
 
     def enterEvent(self, event):
-        self._auto_close_timer.stop()
+        if self._auto_close_active is True and self._is_cursor_within_bounds():
+            self._auto_close_armed = True
+        self._ensure_auto_close_monitor()
         base_widgets.QFlatDialog.enterEvent(self, event)
 
     def leaveEvent(self, event):
-        if self._auto_close_active:
-            self._auto_close_timer.start()
-
+        self._ensure_auto_close_monitor()
         base_widgets.QFlatDialog.leaveEvent(self, event)
 
     def resizeEvent(self, event):
@@ -1130,6 +1268,38 @@ class FloatingWidget(base_widgets.QFlatDialog):
     def closeEvent(self, event):
         self._disable_auto_close()
         base_widgets.QFlatDialog.closeEvent(self, event)
+    def showEvent(self, event):
+        # Restart the grace window every time the popup (re)appears, not just
+        # on first construction -- a reused/hidden-then-reshown widget can hit
+        # the same stale-geometry window.
+        self._auto_close_timer.stop()
+        self._auto_close_armed = False
+        self._auto_close_origin = QtGui.QCursor.pos()
+        self._shown_elapsed.start()
+        base_widgets.QFlatDialog.showEvent(self, event)
+        self._ensure_auto_close_monitor()
+
+    def _ensure_auto_close_monitor(self):
+        """Poll global cursor distance while a transient popup is visible.
+
+        A top-level Qt tool window does not reliably receive mouse-move or
+        leave events after the pointer crosses into Maya or another native
+        window. Polling ``QCursor.pos()`` keeps distance-based closing
+        independent of application focus and event delivery.
+        """
+        if (
+            self._auto_close_active is True
+            and self.isVisible()
+            and not self._auto_close_timer.isActive()
+        ):
+            self._auto_close_timer.start()
+
+    @staticmethod
+    def _distance_from_rect(point, rect):
+        """Return the shortest screen-space distance from a point to a rectangle."""
+        dx = max(rect.left() - point.x(), 0, point.x() - rect.right())
+        dy = max(rect.top() - point.y(), 0, point.y() - rect.bottom())
+        return (dx * dx + dy * dy) ** 0.5
 
 
 class PillSlider(QWidget):
@@ -1219,16 +1389,196 @@ class PillSlider(QWidget):
             self.callback(self.value)
 
 
-class AttributePopup(QWidget):
+
+
+def _t(text):
+    return text
+
+ATTRIBUTE_SWITCHER_GLOBE_IMAGE = util.return_icon_path("globe.svg")
+
+def _option_button_stylesheet(compact=False):
+    """Return the shared enum-option style used by both switch popups."""
+    if compact:
+        return (
+            "QPushButton { color: %s; background: %s; text-align: left; "
+            "padding: %spx; border-radius: %spx; border: none; }"
+            "QPushButton:hover { background: %s; }"
+            "QPushButton:checked { color: %s; background: %s; font-weight: bold; }"
+            % (
+                COLOR_ACCENT_HOVER,
+                COLOR_ACCENT_DARK,
+                util.DPI(7),
+                util.DPI(6),
+                COLOR_ACCENT_MAIN,
+                COLOR_BG_MAIN,
+                COLOR_ACCENT_LIGHT,
+            )
+        )
+    return (
+        "QPushButton { color: %s; background: %s; text-align: left; "
+        "padding: %spx %spx %spx %spx; border-radius: %spx; "
+        "font-size: %spx; font-weight: bold; border: none; }"
+        "QPushButton:hover, QPushButton:pressed { color: %s; background: %s; }"
+        "QPushButton:checked { color: %s; background: %s; }"
+        % (
+            COLOR_ACCENT_HOVER,
+            COLOR_ACCENT_DARK,
+            util.DPI(8),
+            util.DPI(18),
+            util.DPI(8),
+            util.DPI(8),
+            util.DPI(6),
+            util.DPI(11),
+            COLOR_ACCENT_DARK,
+            COLOR_ACCENT_MAIN,
+            COLOR_BG_MAIN,
+            COLOR_ACCENT_LIGHT,
+        )
+    )
+
+def _configure_option_button(button, compact=False):
+    """Apply the common interaction and appearance for enum options."""
+    button.setFlat(True)
+    button.setCursor(QtCore.Qt.PointingHandCursor)
+    button.setStyleSheet(_option_button_stylesheet(compact=compact))
+
+def _add_option_state_indicator(button, is_current=False, is_keyed=False):
+    """Add the standard current/keyed dot used by attribute options."""
+    dot_layout = QtWidgets.QHBoxLayout(button)
+    dot_layout.setContentsMargins(0, 0, util.DPI(6), 0)
+    dot_layout.addStretch(1)
+
+    dot = QtWidgets.QWidget(button)
+    dot.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+    dot_size = util.DPI(10)
+    dot.setFixedSize(dot_size, dot_size)
+    if is_current:
+        color = COLOR_BG_TRACK
+    elif is_keyed:
+        color = COLOR_BLEND_MULTI
+    else:
+        color = "transparent"
+    dot.setStyleSheet(
+        "background: {}; border-radius: {}px;".format(color, dot_size // 2)
+    )
+    dot_layout.addWidget(dot)
+
+def _rotation_order_option_text(option, gimbal_info):
+    """Render the shared GimbalAnalyzer result in every option picker."""
+    info = (gimbal_info or {}).get(option, {})
+    label = str(info.get("label", "")).strip()
+    return "{} ({})".format(option, label) if label else option
+
+def _connect_checkable_button(button, callback, *callback_args):
+    """Connect checked buttons across Qt bindings that omit clicked(bool)."""
+    def _dispatch(*_signal_args):
+        callback(button.isChecked(), *callback_args)
+
+    button.clicked.connect(_dispatch)
+
+def _multi_select_modifier_held():
+    """Query Ctrl/Cmd directly instead of relying on Maya key delivery."""
+    query_modifiers = getattr(
+        QtGui.QGuiApplication, "queryKeyboardModifiers", None
+    )
+    if callable(query_modifiers):
+        modifiers = query_modifiers()
+    else:
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+    return bool(
+        modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier)
+    )
+
+def _populate_attribute_entry_state(entry, objects_map):
+    """Populate the shared option/current/key state used by both row types."""
+    entry.objects_map = objects_map
+    any_obj = next(iter(objects_map.values()))
+    entry.is_enum = any_obj.get("type") == "enum"
+    entry.min_val = any_obj.get("min", 0)
+    entry.max_val = any_obj.get("max", 1)
+    entry.options = any_obj.get("enum", [])
+    entry.current_indices = {
+        obj.get("current") for obj in objects_map.values()
+    }
+    entry.marked_indices = {
+        index
+        for obj in objects_map.values()
+        for index in obj.get("marked", [])
+    }
+    keyed_values = {
+        index
+        for obj in objects_map.values()
+        for index in obj.get("keyed_values", [])
+    }
+    entry.has_mixed_key_values = entry.is_enum and len(keyed_values) > 1
+    entry.indices = entry.current_indices | entry.marked_indices
+    entry.current_idx = any_obj.get("current", 0)
+    entry.gimbal_info = any_obj.get("gimbal", {})
+
+class _StagedAttributeEntry:
+    """Non-visual per-target view of a collapsed AttributeItem."""
+
+    def __init__(self, source_item, target, object_data):
+        self.enum_attr = source_item.enum_attr
+        self.object_label = source_item.parent_dialog._format_object_name(
+            [target]
+        )
+        self.attribute_label = source_item.attribute_label
+        _populate_attribute_entry_state(self, {target: object_data})
+
+class _PopupOptionButton(QtWidgets.QPushButton):
+    """Option button supporting menu-style press, drag, and release."""
+
+    def __init__(self, text, popup, index, all_frames):
+        QtWidgets.QPushButton.__init__(self, text, popup.main_frame)
+        self.popup = popup
+        self.option_index = index
+        self.all_frames = all_frames
+
+    @staticmethod
+    def _global_pos(event):
+        return Qtx.global_pos(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.grabMouse()
+            self.popup._begin_option_drag(self)
+            event.accept()
+            return
+        QtWidgets.QPushButton.mousePressEvent(self, event)
+
+    def mouseMoveEvent(self, event):
+        if self.popup._drag_active:
+            self.popup._update_option_drag(self._global_pos(event))
+            event.accept()
+            return
+        QtWidgets.QPushButton.mouseMoveEvent(self, event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self.popup._drag_active:
+            global_pos = self._global_pos(event)
+            try:
+                self.releaseMouse()
+            except RuntimeError:
+                pass
+            self.popup._finish_option_drag(global_pos)
+            event.accept()
+            return
+        QtWidgets.QPushButton.mouseReleaseEvent(self, event)
+
+class AttributePopup(QtWidgets.QWidget):
+    """
+    A floating popup that lists attribute options with a dot for the selected one.
+    """
+
     ALL_KEYFRAMES = "All Keyframes"
     CURRENT_KEYFRAMES = "Current Keyframes"
 
     def __init__(self, item_widget, on_select):
-        QWidget.__init__(self, item_widget.window())
-
-        self.setWindowFlags(Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        QtWidgets.QWidget.__init__(self, item_widget.window())
+        self.setWindowFlags(QtCore.Qt.ToolTip | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
 
         self.item_widget = item_widget
         self.options = item_widget.options
@@ -1237,17 +1587,19 @@ class AttributePopup(QWidget):
         self.current_indices = item_widget.current_indices
         self.marked_indices = item_widget.marked_indices
         self.on_select = on_select
+        self._option_buttons = []
+        self._drag_active = False
 
         any_obj = next(iter(item_widget.objects_map.values()))
-
         self.is_enum = any_obj.get("type") == "enum"
-        self.min_value = any_obj.get("min", 0.0)
-        self.max_value = any_obj.get("max", 1.0)
+        self.min_val = any_obj.get("min", 0)
+        self.max_val = any_obj.get("max", 1)
 
         self._setup_ui()
 
     def _setup_ui(self):
-        self.main_frame = QFrame(self)
+        """Main entry point for UI construction."""
+        self.main_frame = QtWidgets.QFrame(self)
         self.main_frame.setObjectName("PopupFrame")
         self.main_frame.setStyleSheet(
             """
@@ -1255,10 +1607,10 @@ class AttributePopup(QWidget):
                 background-color: {};
                 border-radius: {}px;
             }}
-            """.format(COLOR_BG_POPUP, util.DPI(8))
+        """.format(COLOR_BG_POPUP, util.DPI(8))
         )
 
-        self.content_layout = QVBoxLayout(self.main_frame)
+        self.content_layout = QtWidgets.QVBoxLayout(self.main_frame)
         self.content_layout.setContentsMargins(util.DPI(20), util.DPI(10), util.DPI(18), util.DPI(16))
         self.content_layout.setSpacing(util.DPI(1))
 
@@ -1267,286 +1619,323 @@ class AttributePopup(QWidget):
         else:
             self._build_numeric_ui()
 
+        # Finalize structure and size
         self.adjustSize()
-
-        self.outer_layout = QVBoxLayout(self)
+        self.outer_layout = QtWidgets.QVBoxLayout(self)
         self.outer_layout.setContentsMargins(util.DPI(10), 0, 0, 0)
         self.outer_layout.addWidget(self.main_frame)
 
     def _build_enum_ui(self):
-        is_rotate_order = self.item_widget.enum_attr == "rotateOrder"
+        """Builds sections for enum discrete options."""
+        is_ro = self.item_widget.enum_attr == "rotateOrder"
 
-        if is_rotate_order:
-            self._add_category(self.ALL_KEYFRAMES, is_all=True, is_rotate_order=True)
+        if is_ro:
+            self._add_category(self.ALL_KEYFRAMES, is_all=True, is_rr=True)
         else:
             self._add_category(self.CURRENT_KEYFRAMES, is_all=False)
             self._add_separator()
             self._add_category(self.ALL_KEYFRAMES, is_all=True)
 
     def _build_numeric_ui(self):
+        """Builds sections for continuous numeric sliders."""
         self._add_slider_section(self.CURRENT_KEYFRAMES, is_all=False)
         self._add_separator()
         self._add_slider_section(self.ALL_KEYFRAMES, is_all=True)
 
-    def _title(self, text):
-        label = QLabel(text)
-        label.setContentsMargins(0, 0, 0, util.DPI(4))
-        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        label.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_TEXT_SECONDARY, util.DPI(11)))
-        return label
+    def _add_category(self, title_text, is_all, is_rr=False):
+        """Creates a section with a title and a list of option buttons."""
+        self.content_layout.addWidget(self._create_title(title_text))
+
+        for i, opt in enumerate(self.options):
+            display_text = (
+                _rotation_order_option_text(
+                    opt, self.item_widget.gimbal_info
+                )
+                if is_rr else opt
+            )
+
+            btn = self._create_option_button(display_text, i, is_all)
+            self.content_layout.addWidget(btn)
+
+            # Extra visual grouping for rotation orders (3+3)
+            if is_rr and i == 2:
+                self.content_layout.addSpacing(util.DPI(5))
+
+    def _create_title(self, text):
+        title = QtWidgets.QLabel(text)
+        title.setContentsMargins(0, 0, 0, util.DPI(4))
+        title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        title.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_TEXT_SECONDARY, util.DPI(11)))
+        return title
 
     def _add_separator(self):
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
         line.setFixedHeight(1)
         line.setStyleSheet("background-color: {};".format(COLOR_BG_TRACK))
-
         self.content_layout.addSpacing(util.DPI(10))
         self.content_layout.addWidget(line)
         self.content_layout.addSpacing(util.DPI(10))
 
-    def _add_category(self, title, is_all, is_rotate_order=False):
-        self.content_layout.addWidget(self._title(title))
-
-        for i, option in enumerate(self.options):
-            text = option
-
-            if is_rotate_order and self.item_widget.gimbal_info:
-                info = self.item_widget.gimbal_info.get(option, {})
-                label = info.get("label", "")
-                if label:
-                    text = "{} ({})".format(option, label)
-
-            self.content_layout.addWidget(self._button(text, i, is_all))
-
-            if is_rotate_order and i == 2:
-                self.content_layout.addSpacing(util.DPI(5))
-
-    def _add_slider_section(self, title, is_all):
-        self.content_layout.addWidget(self._title(title))
+    def _add_slider_section(self, title_text, is_all):
+        """Creates a section with a title and a PillSlider."""
+        self.content_layout.addWidget(self._create_title(title_text))
 
         slider = PillSlider(
-            self.current_idx,
-            self.min_value,
-            self.max_value,
-            lambda value, mode=is_all: self.select_option(value, all_frames=mode),
-            parent=self.main_frame,
+            self.current_idx, self.min_val, self.max_val, lambda v, m=is_all: self.select_option(v, all_frames=m), parent=self.main_frame
         )
-
         self.content_layout.addWidget(slider)
 
-    def _button(self, text, index, is_all):
-        button = QPushButton(text)
-        button.setFlat(True)
-        button.setCursor(Qt.PointingHandCursor)
-        button.setMinimumWidth(util.DPI(60))
-        button.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-        button.setStyleSheet(
-            """
-            QPushButton {{
-                color: {0};
-                background-color: {1};
-                text-align: left;
-                padding: {2}px {3}px {2}px {2}px;
-                border-radius: {4}px;
-                font-size: {5}px;
-                font-weight: bold;
-                border: none;
-            }}
-            QPushButton:hover {{
-                background-color: {6};
-                color: {1};
-            }}
-            """.format(
-                COLOR_ACCENT_HOVER,
-                COLOR_ACCENT_DARK,
-                util.DPI(8),
-                util.DPI(18),
-                util.DPI(6),
-                util.DPI(11),
-                COLOR_ACCENT_MAIN,
-            )
+    def _create_option_button(self, text, index, is_all):
+        btn = _PopupOptionButton(text, self, index, is_all)
+        _configure_option_button(btn)
+        btn.setMinimumWidth(util.DPI(60))
+        btn.setSizePolicy(QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Fixed)
+        _add_option_state_indicator(
+            btn,
+            is_current=index in self.current_indices,
+            is_keyed=index in self.marked_indices,
         )
+        self._option_buttons.append(btn)
+        return btn
 
-        layout = QHBoxLayout(button)
-        layout.setContentsMargins(0, 0, util.DPI(6), 0)
-        layout.addStretch()
+    def _button_at_global_pos(self, global_pos):
+        for button in self._option_buttons:
+            if not util.is_valid_widget(button) or not button.isVisible():
+                continue
+            local_pos = button.mapFromGlobal(global_pos)
+            if button.rect().contains(local_pos):
+                return button
+        return None
 
-        dot = QWidget()
-        dot.setAttribute(Qt.WA_TransparentForMouseEvents)
+    def _set_drag_hover_button(self, button):
+        for option_button in self._option_buttons:
+            if util.is_valid_widget(option_button):
+                option_button.setDown(option_button is button)
 
-        dot_size = util.DPI(10)
-        dot.setFixedSize(dot_size, dot_size)
+    def _begin_option_drag(self, button):
+        self._drag_active = True
+        self._set_drag_hover_button(button)
+        self.item_widget._set_popup_active(True)
 
-        if index in self.current_indices:
-            dot.setStyleSheet("background: {}; border-radius: {}px;".format(COLOR_BG_TRACK, dot_size // 2))
-        elif index in self.marked_indices:
-            dot.setStyleSheet("background: {}; border-radius: {}px;".format(COLOR_BLEND_MULTI, dot_size // 2))
+    def _update_option_drag(self, global_pos):
+        self._set_drag_hover_button(self._button_at_global_pos(global_pos))
+
+    def _finish_option_drag(self, global_pos):
+        button = self._button_at_global_pos(global_pos)
+        self._drag_active = False
+        self._set_drag_hover_button(None)
+        if button is not None:
+            self.select_option(
+                button.option_index, all_frames=button.all_frames
+            )
+
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(COLOR_BG_POPUP))
+
+        arrow_w = util.DPI(10)
+        arrow_h = util.DPI(15)
+
+        side = getattr(self, "side", "right")
+        arrow_y = getattr(self, "arrow_y", self.height() / 2)
+
+        if side == "right":
+            # Pointing left, attached to the left side of the frame
+            poly = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(0, arrow_y),
+                    QtCore.QPointF(arrow_w + 1, arrow_y - arrow_h / 2),
+                    QtCore.QPointF(arrow_w + 1, arrow_y + arrow_h / 2),
+                ]
+            )
         else:
-            dot.setStyleSheet("background: transparent;")
+            # Pointing right, attached to the right side of the frame
+            w = self.width()
+            poly = QtGui.QPolygonF(
+                [
+                    QtCore.QPointF(w, arrow_y),
+                    QtCore.QPointF(w - arrow_w - 1, arrow_y - arrow_h / 2),
+                    QtCore.QPointF(w - arrow_w - 1, arrow_y + arrow_h / 2),
+                ]
+            )
+        painter.drawPolygon(poly)
 
-        layout.addWidget(dot)
-
-        button.clicked.connect(lambda checked=False: self.select_option(index, all_frames=is_all))
-        return button
-
-    def select_option(self, index, all_frames=None):
-        self.on_select(index, all_frames=all_frames)
+    def select_option(self, idx, all_frames=None):
+        # Tear ourselves down before calling out to on_select(), not after:
+        # on_select() applies the switch, which refreshes the parent
+        # dialog's widget list -- and that refresh would otherwise tear
+        # this same popup down as a side effect (_close_active_popup(),
+        # since this *is* the active popup) while we're still in the
+        # middle of handling the click that opened it. closeEvent() below
+        # clears the parent's _active_popup handle immediately, so that
+        # later _close_active_popup() call just no-ops instead of racing
+        # us to close/delete the same widget from two places.
         self.close()
+        self.deleteLater()
+        self.on_select(idx, all_frames=all_frames)
+
+    def enterEvent(self, event):
+        # Notify parent for unified interaction state
+        p = self.parent()
+        if p and hasattr(p, "_update_interaction_state"):
+            p._update_interaction_state(True)
+        QtWidgets.QWidget.enterEvent(self, event)
+
+    def leaveEvent(self, event):
+        p = self.parent()
+        if p and hasattr(p, "_update_interaction_state"):
+            # Delay to check if focus moved back to main area
+            QtCore.QTimer.singleShot(150, lambda: p._update_interaction_state(False))
+        QtWidgets.QWidget.leaveEvent(self, event)
+
+    def closeEvent(self, event):
+        self._drag_active = False
+        self._set_drag_hover_button(None)
+        mouse_grabber = QtWidgets.QWidget.mouseGrabber()
+        if mouse_grabber in self._option_buttons:
+            try:
+                mouse_grabber.releaseMouse()
+            except RuntimeError:
+                pass
+        if util.is_valid_widget(self.item_widget):
+            self.item_widget._set_popup_active(False)
+        p = self.parent()
+        if p:
+            # Re-evaluate parent's close conditions
+            if hasattr(p, "_active_popup") and p._active_popup == self:
+                p._active_popup = None
+            if hasattr(p, "_resume_auto_close"):
+                p._resume_auto_close()
+        QtWidgets.QWidget.closeEvent(self, event)
 
     def show_beside(self, widget):
         self.adjustSize()
+        w, h = self.width(), self.height()
 
-        width = self.width()
-        height = self.height()
+        # Global center Y of the source widget
+        target_y_global = widget.mapToGlobal(QtCore.QPoint(0, widget.height() // 2)).y()
 
-        target_y = widget.mapToGlobal(QPoint(0, widget.height() // 2)).y()
-        pos = widget.mapToGlobal(QPoint(widget.width(), 0))
+        # Default: show on the right
+        pos = widget.mapToGlobal(QtCore.QPoint(widget.width(), 0))
 
-        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+        screen = QtGui.QGuiApplication.screenAt(pos) or QtGui.QGuiApplication.primaryScreen()
         geo = screen.availableGeometry()
 
         self.side = "right"
-
-        if pos.x() + width > geo.right():
+        # If it overflows on the right, flip to left
+        if pos.x() + w > geo.right():
             self.side = "left"
-            pos.setX(widget.mapToGlobal(QPoint(0, 0)).x() - width)
+            pos.setX(widget.mapToGlobal(QtCore.QPoint(0, 0)).x() - w)
 
-        y = target_y - height // 2
-        y = min(y, geo.bottom() - height - util.DPI(5))
-        y = max(y, geo.top() + util.DPI(5))
+        # Vertical positioning: center it relative to widget
+        y = target_y_global - h // 2
+
+        # Ensure it doesn't go off screen vertically
+        if y + h > geo.bottom():
+            y = geo.bottom() - h - util.DPI(5)
+        if y < geo.top():
+            y = geo.top() + util.DPI(5)
 
         pos.setY(y)
-        self.arrow_y = target_y - y
+        # Store local y for the arrow tip to keep pointing at the target
+        self.arrow_y = target_y_global - y
 
-        arrow_width = util.DPI(10)
-
+        # Update margins based on which side the arrow is on
+        arrow_w = util.DPI(10)
         if self.side == "right":
-            self.outer_layout.setContentsMargins(arrow_width, 0, 0, 0)
+            self.outer_layout.setContentsMargins(arrow_w, 0, 0, 0)
         else:
-            self.outer_layout.setContentsMargins(0, 0, arrow_width, 0)
+            self.outer_layout.setContentsMargins(0, 0, arrow_w, 0)
 
         self.move(pos)
         self.show()
 
-    def enterEvent(self, event):
-        parent = self.parent()
 
-        if parent and hasattr(parent, "_update_interaction_state"):
-            parent._update_interaction_state(True)
+class AttributeItem(QtWidgets.QWidget):
+    """
+    A row item that shows an attribute name and a pill with the current value.
+    """
 
-        QWidget.enterEvent(self, event)
-
-    def leaveEvent(self, event):
-        parent = self.parent()
-
-        if parent and hasattr(parent, "_update_interaction_state"):
-            QTimer.singleShot(150, lambda: parent._update_interaction_state(False))
-
-        QWidget.leaveEvent(self, event)
-
-    def closeEvent(self, event):
-        parent = self.parent()
-
-        if parent:
-            if getattr(parent, "_active_popup", None) == self:
-                parent._active_popup = None
-
-            if hasattr(parent, "_resume_auto_close"):
-                parent._resume_auto_close()
-
-        QWidget.closeEvent(self, event)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(COLOR_BG_POPUP))
-
-        arrow_width = util.DPI(10)
-        arrow_height = util.DPI(15)
-        arrow_y = getattr(self, "arrow_y", self.height() / 2)
-
-        if getattr(self, "side", "right") == "right":
-            poly = QPolygonF(
-                [
-                    QPointF(0, arrow_y),
-                    QPointF(arrow_width + 1, arrow_y - arrow_height / 2),
-                    QPointF(arrow_width + 1, arrow_y + arrow_height / 2),
-                ]
-            )
-        else:
-            width = self.width()
-            poly = QPolygonF(
-                [
-                    QPointF(width, arrow_y),
-                    QPointF(width - arrow_width - 1, arrow_y - arrow_height / 2),
-                    QPointF(width - arrow_width - 1, arrow_y + arrow_height / 2),
-                ]
-            )
-
-        painter.drawPolygon(poly)
-
-
-class AttributeItem(QWidget):
-    def __init__(self, label_text, enum_attr, unique_controls, objects_map, parent_dialog):
-        QWidget.__init__(self, parent_dialog.mainContent)
-
-        self.label_text = label_text
+    def __init__(
+        self,
+        object_label,
+        attribute_label,
+        enum_attr,
+        unique_controls,
+        objects_map,
+        parent_dialog,
+    ):
+        QtWidgets.QWidget.__init__(self, parent_dialog.mainContent)
+        self.object_label = object_label
+        self.attribute_label = attribute_label
+        self.label_text = "{} {}".format(object_label, attribute_label)
         self.enum_attr = enum_attr
         self.unique_controls = unique_controls
-        self.objects_map = objects_map
         self.parent_dialog = parent_dialog
 
-        any_obj = next(iter(objects_map.values()))
+        _populate_attribute_entry_state(self, objects_map)
 
-        self.is_enum = any_obj.get("type") == "enum"
-        self.min_value = any_obj.get("min", 0.0)
-        self.max_value = any_obj.get("max", 1.0)
-        self.options = any_obj.get("enum", [])
-        self.current_idx = any_obj.get("current", 0.0)
-        self.gimbal_info = any_obj.get("gimbal", {})
         self.is_toggle = self.is_enum and len(self.options) <= 2
-
-        if self.is_enum:
-            self.current_indices = {int(obj.get("current", 0)) for obj in objects_map.values()}
-            self.marked_indices = {int(idx) for obj in objects_map.values() for idx in obj.get("marked", [])}
-        else:
-            self.current_indices = set()
-            self.marked_indices = set()
-
-        self.indices = self.current_indices | self.marked_indices
         self._hover_active = False
-
+        self._popup_active = False
         self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
+        self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self._setup_ui()
 
     def _setup_ui(self):
-        self.main_layout = QHBoxLayout(self)
+        self.main_layout = QtWidgets.QHBoxLayout(self)
         self.main_layout.setContentsMargins(util.DPI(6), util.DPI(6), util.DPI(6), util.DPI(6))
         self.main_layout.setSpacing(util.DPI(6))
 
-        self.name_label = QLabel(self.label_text, self)
+        self.multi_checkbox = QtWidgets.QCheckBox(self)
+        self.multi_checkbox.setObjectName("HotkeyCommandCheckBox")
+        self.multi_checkbox.setVisible(False)
+        self.multi_checkbox.setToolTip(_t("Select this channel for a staged multi-switch"))
+        self.multi_checkbox.setCursor(QtCore.Qt.PointingHandCursor)
+        self.multi_checkbox.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+        )
+        self.multi_checkbox.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.multi_checkbox.setStyleSheet(
+            "#HotkeyCommandCheckBox{background:transparent;spacing:0px;}"
+            "#HotkeyCommandCheckBox::indicator{width:%spx;height:%spx;border:1px solid #626262;border-radius:%spx;background:#262626;}"
+            "#HotkeyCommandCheckBox::indicator:hover{border-color:#7d7d7d;background:#303030;}"
+            "#HotkeyCommandCheckBox::indicator:checked{image:url(%s);border-color:#7d7d7d;background:#363636;}"
+            % (util.DPI(11), util.DPI(11), util.DPI(3), util.return_icon_path("apply"))
+        )
+        self.multi_checkbox.toggled.connect(self._on_multi_checked)
+
+        display_label = self.label_text
+        if self.has_mixed_key_values:
+            display_label += " *"
+        self.name_label = QtWidgets.QLabel(display_label, self)
         self.name_label.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_TEXT_MAIN, util.DPI(11)))
-        self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.name_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.name_label.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
 
-        self.pill_container = QWidget(self)
+        self.pill_container = QtWidgets.QWidget(self)
+        self.pill_container.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
         self.pill_container.setFixedSize(util.DPI(60), util.DPI(16))
-
-        self.pill_layout = QHBoxLayout(self.pill_container)
+        self.pill_layout = QtWidgets.QHBoxLayout(self.pill_container)
         self.pill_layout.setContentsMargins(util.DPI(2), 0, util.DPI(2), 0)
         self.pill_layout.setSpacing(util.DPI(2))
 
-        self.sq_btn = QPushButton(self.pill_container)
+        # Indicator 'Ball' style
+        self.sq_btn = QtWidgets.QPushButton(self.pill_container)
         self.sq_btn.setFixedSize(util.DPI(12), util.DPI(12))
-        self.sq_btn.setFocusPolicy(Qt.NoFocus)
-        self.sq_btn.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.sq_btn.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.sq_btn.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
 
-        self.val_label = QLabel(self.current_display_value(), self.pill_container)
+        self.val_label = QtWidgets.QLabel(
+            self.options[max(0, min(int(self.current_idx), len(self.options) - 1))] if self.is_enum and self.options else "{:.2f}".format(self.current_idx), self.pill_container
+        )
         self.val_label.setStyleSheet("color: {}; font-size: {}px;".format(COLOR_ACCENT_LIGHT, util.DPI(11)))
-        self.val_label.setAlignment(Qt.AlignCenter)
+        self.val_label.setAlignment(QtCore.Qt.AlignCenter)
+
+        # Toggles hide text until hover; Enums show text always; Numeric hide always
         self.val_label.setVisible(self.is_enum and not self.is_toggle)
 
         if self.is_enum:
@@ -1555,7 +1944,6 @@ class AttributeItem(QWidget):
                 self.sq_btn.show()
             else:
                 self.sq_btn.hide()
-
             self.pill_layout.addStretch()
             self.pill_layout.addWidget(self.val_label)
             self.pill_layout.addStretch()
@@ -1564,119 +1952,162 @@ class AttributeItem(QWidget):
             self.pill_layout.setContentsMargins(util.DPI(2), 0, util.DPI(2), 0)
             self.pill_layout.addWidget(self.val_label)
             self.sq_btn.setParent(self.pill_container)
-            QTimer.singleShot(0, self._update_numeric_ball_pos)
+            QtCore.QTimer.singleShot(0, self._update_numeric_ball_pos)
 
         self._refresh_pill_style()
 
+        self.main_layout.addWidget(self.multi_checkbox, 0, QtCore.Qt.AlignVCenter)
         self.main_layout.addWidget(self.name_label, 1)
         self.main_layout.addWidget(self.pill_container)
 
-        self.pill_opacity = QGraphicsOpacityEffect(self.pill_container)
+        # Keep layout space but make transparent
+        self.pill_opacity = QtWidgets.QGraphicsOpacityEffect(self.pill_container)
         self.pill_container.setGraphicsEffect(self.pill_opacity)
         self.pill_opacity.setOpacity(0.0)
 
-    def current_display_value(self):
-        if self.is_enum and self.options:
-            index = int(self.current_idx)
+    def _set_popup_active(self, active):
+        self._popup_active = bool(active)
+        self._hover_active = self._popup_active or self.underMouse()
+        self.update()
 
-            if 0 <= index < len(self.options):
-                return self.options[index]
+    def _on_multi_checked(self, checked):
+        self._update_multi_checkbox_visibility()
+        self.update()
+        handler = getattr(
+            self.parent_dialog, "_on_attribute_multi_checked", None
+        )
+        if callable(handler):
+            handler(self, checked)
 
-            return ""
+    @staticmethod
+    def _multi_select_modifier_held():
+        return _multi_select_modifier_held()
 
-        return "{:.2f}".format(float(self.current_idx))
+    def _update_multi_checkbox_visibility(self):
+        if not self.is_enum:
+            self.multi_checkbox.hide()
+            return
+        cursor_inside = self.rect().contains(
+            self.mapFromGlobal(QtGui.QCursor.pos())
+        )
+        should_show = self.multi_checkbox.isChecked() or (
+            cursor_inside and self._multi_select_modifier_held()
+        )
+        self.multi_checkbox.setVisible(should_show)
 
     def _update_numeric_ball_pos(self):
         if self.is_enum:
             return
+        w = self.pill_container.width()
+        ball_w = self.sq_btn.width()
+        padding = util.DPI(2)  # Match enum layout margins
+        usable_w = w - ball_w - (padding * 2)
 
-        width = self.pill_container.width()
-        ball_width = self.sq_btn.width()
-        padding = util.DPI(2)
-        usable_width = width - ball_width - (padding * 2)
-
-        if self.max_value <= self.min_value:
-            x = padding + (usable_width // 2)
+        if self.max_val <= self.min_val:
+            x = padding + (usable_w // 2)
         else:
-            ratio = (float(self.current_idx) - self.min_value) / (self.max_value - self.min_value)
+            ratio = (self.current_idx - self.min_val) / (self.max_val - self.min_val)
             ratio = max(0.0, min(1.0, ratio))
-            x = int(padding + ratio * usable_width)
-
+            x = int(padding + (ratio * usable_w))
         self.sq_btn.move(x, (self.pill_container.height() - self.sq_btn.height()) // 2)
         self.sq_btn.show()
 
     def _refresh_pill_style(self):
+        # Colors from reference
         ball_color = COLOR_ACCENT_MAIN
         pill_bg = COLOR_ACCENT_DARK
 
-        try:
-            current_index = int(self.current_idx)
-        except Exception:
-            current_index = self.current_idx
-
-        if current_index in self.marked_indices:
+        if self.current_idx in self.marked_indices:
             ball_color = COLOR_ACCENT_LIGHT
 
         if self.enum_attr == "rotateOrder":
             self.sq_btn.setStyleSheet("background: transparent; border: none;")
-            pixmap = QPixmap(util.return_icon_path("globe.svg"))
+            icon = ATTRIBUTE_SWITCHER_GLOBE_IMAGE
 
+            pixmap = QtGui.QPixmap(icon)
             if not pixmap.isNull():
-                size = max(1, int(util.DPI(12)))
-                pixmap = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                # Ensure sizes are integers
+                target_size = int(util.DPI(12))
+                if target_size < 1:
+                    target_size = 12
 
-                tinted = QPixmap(pixmap.size())
-                tinted.fill(Qt.transparent)
+                pixmap = pixmap.scaled(target_size, target_size, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
 
-                painter = QPainter(tinted)
+                # Tint the icon
+                tinted = QtGui.QPixmap(pixmap.size())
+                tinted.fill(QtCore.Qt.transparent)
+                painter = QtGui.QPainter(tinted)
                 painter.drawPixmap(0, 0, pixmap)
-                painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-                painter.fillRect(tinted.rect(), QColor(ball_color))
+                painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceIn)
+                painter.fillRect(tinted.rect(), QtGui.QColor(ball_color))
                 painter.end()
 
-                self.sq_btn.setIcon(QIcon(tinted))
-                self.sq_btn.setIconSize(QSize(size, size))
+                self.sq_btn.setIcon(QtGui.QIcon(tinted))
+                self.sq_btn.setIconSize(QtCore.QSize(target_size, target_size))
             else:
-                self.sq_btn.setIcon(QIcon())
-                self.sq_btn.setStyleSheet(
-                    "background: {}; border-radius: {}px; border: none;".format(
-                        ball_color,
-                        int(util.DPI(6)),
-                    )
-                )
+                # Basic dot fallback if SVG fails to load
+                self.sq_btn.setIcon(QtGui.QIcon())
+                self.sq_btn.setStyleSheet("background: {}; border-radius: {}px; border: none;".format(ball_color, int(util.DPI(6))))
         else:
-            self.sq_btn.setIcon(QIcon())
-            self.sq_btn.setStyleSheet(
-                "background: {}; border-radius: {}px; border: none;".format(
-                    ball_color,
-                    int(util.DPI(6)),
-                )
-            )
+            self.sq_btn.setIcon(QtGui.QIcon())
+            self.sq_btn.setStyleSheet("background: {}; border-radius: {}px; border: none;".format(ball_color, int(util.DPI(6))))
 
-        self.pill_container.setStyleSheet(
-            "background: {}; border-radius: {}px;".format(
-                pill_bg,
-                util.DPI(8),
-            )
-        )
+        self.pill_container.setStyleSheet("background: {}; border-radius: {}px;".format(pill_bg, util.DPI(8)))
 
-    def currentText(self):
-        if not self.is_enum:
-            return self.current_idx
+    def paintEvent(self, event):
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        if not self.options:
-            return ""
+        # Draw row background as seen in reference
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        bg_color = QtGui.QColor(COLOR_ACCENT_MAIN)
+        if self.is_enum and self.multi_checkbox.isChecked():
+            bg_color = QtGui.QColor(COLOR_BLEND_MULTI)
+        elif self._hover_active:
+            bg_color = QtGui.QColor(COLOR_ACCENT_WHITE)
 
-        index = int(self.current_idx)
+        painter.setBrush(QtGui.QBrush(bg_color))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1))
+        painter.drawRoundedRect(rect, 2, 2)
 
-        if index < 0 or index >= len(self.options):
-            return ""
+    def enterEvent(self, event):
+        self._hover_active = True
+        self._update_multi_checkbox_visibility()
+        self.update()
+        if self.parent_dialog:
+            self.parent_dialog._handle_attr_hover(self)
+            # Ensure parent interaction state is active when a row is hovered
+            if hasattr(self.parent_dialog, "_update_interaction_state"):
+                self.parent_dialog._update_interaction_state(True)
+        QtWidgets.QWidget.enterEvent(self, event)
 
-        return self.options[index]
+    def mouseMoveEvent(self, event):
+        self._update_multi_checkbox_visibility()
+        QtWidgets.QWidget.mouseMoveEvent(self, event)
 
-    def on_select(self, index, all_frames=None):
-        self.current_idx = index
-        self.val_label.setText(self.current_display_value())
+    def mousePressEvent(self, event):
+        if (
+            event.button() == QtCore.Qt.LeftButton
+            and self.is_enum
+            and self.multi_checkbox.isVisible()
+        ):
+            self.multi_checkbox.toggle()
+            event.accept()
+            return
+        QtWidgets.QWidget.mousePressEvent(self, event)
+
+    def leaveEvent(self, event):
+        self._hover_active = self._popup_active
+        if not self.multi_checkbox.isChecked():
+            self.multi_checkbox.hide()
+        self.update()
+        if self.parent_dialog:
+            self.parent_dialog._handle_attr_leave(self)
+        QtWidgets.QWidget.leaveEvent(self, event)
+
+    def on_select(self, idx, all_frames=None):
+        self.current_idx = idx
+        self.val_label.setText((self.options[int(idx)] if self.is_enum else "{:.2f}".format(idx)))
 
         if not self.is_enum:
             self._update_numeric_ball_pos()
@@ -1687,9 +2118,9 @@ class AttributeItem(QWidget):
             return
 
         if self.is_enum:
-            value = self.options[int(index)]
+            value = self.options[int(idx)]
         else:
-            value = index
+            value = idx
 
         options_map = None
 
@@ -1709,15 +2140,15 @@ class AttributeItem(QWidget):
                         xform_target=data.get("xform_target", obj),
                         attr_node=data.get("attr_node", obj),
                         attr=data["attr"],
-                        value=index,
-                        label=index,
+                        value=idx,
+                        label=idx,
                         source=data.get("source", "local"),
                     )
                 )
 
             options_map = {
-                index: {
-                    "index": index,
+                idx: {
+                    "index": idx,
                     "operations": operations,
                 }
             }
@@ -1730,38 +2161,269 @@ class AttributeItem(QWidget):
                 all_frames_override=all_frames,
             )
 
-    def enterEvent(self, event):
-        self._hover_active = True
-        self.update()
+    def currentText(self):
+        return self.options[int(self.current_idx)] if self.options else ""
 
-        if self.parent_dialog:
-            self.parent_dialog._handle_attr_hover(self)
 
-            if hasattr(self.parent_dialog, "_update_interaction_state"):
-                self.parent_dialog._update_interaction_state(True)
+class MultiAttributeSwitchDialog(FloatingWidget):
+    """Stage independent enum choices in a responsive column grid."""
 
-        QWidget.enterEvent(self, event)
+    def __init__(self, parent_dialog, entries):
+        FloatingWidget.__init__(self, popup=False, parent=parent_dialog)
+        self.parent_dialog = parent_dialog
+        self.entries = list(entries or [])
+        self._prepare_gimbal_results()
+        self._selected_options = {}
+        self._option_groups = []
+        self._column_widgets = []
+        self._all_frames = False
+        self.setWindowTitle(_t("Switch Multiple Attributes"))
+        self.setMinimumWidth(util.DPI(220))
+        self._build_ui()
 
-    def leaveEvent(self, event):
-        self._hover_active = False
-        self.update()
+    def _prepare_gimbal_results(self):
+        """Run deferred rotate-order analysis only for staged multi rows."""
+        for item, _options_map in self.entries:
+            if item.enum_attr != "rotateOrder":
+                continue
+            try:
+                combined = self.parent_dialog.analyze_group_gimbal(
+                    item.objects_map
+                )
+            except Exception as exc:
+                cmds.warning(
+                    "Error analyzing staged rotate orders: {}".format(exc)
+                )
+                combined = {}
+            item.gimbal_info = combined
 
-        if self.parent_dialog:
-            self.parent_dialog._handle_attr_leave(self)
+    def _build_ui(self):
+        title = QtWidgets.QLabel(
+            "Switch {} channels".format(len(self.entries)), self.mainContent
+        )
+        title.setStyleSheet(
+            "color: {}; font-size: {}px; font-weight: bold;".format(
+                COLOR_TEXT_SECONDARY, util.DPI(14)
+            )
+        )
+        self.mainLayout.addWidget(title)
 
-        QWidget.leaveEvent(self, event)
+        self.mainLayout.addSpacing(util.DPI(10))
+        self._add_scope_controls()
+        self.mainLayout.addSpacing(util.DPI(10))
+        self._columns_grid = QtWidgets.QGridLayout()
+        self._columns_grid.setContentsMargins(0, 0, 0, 0)
+        self._columns_grid.setHorizontalSpacing(util.DPI(6))
+        self._columns_grid.setVerticalSpacing(util.DPI(6))
+        self.mainLayout.addLayout(self._columns_grid)
+        self._build_columns()
+        self._layout_columns(QtGui.QGuiApplication.primaryScreen())
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        self.setBottomBar(
+            buttons=[
+                base_widgets.QFlatDialogButton(
+                    "Cancel", callback=self._cancel, icon=util.return_icon_path("cancel")
+                ),
+                base_widgets.QFlatDialogButton(
+                    "Apply",
+                    callback=self._apply,
+                    icon=util.return_icon_path("apply"),
+                    highlight=True,
+                ),
+            ],
+            closeButton=False,
+            highlight="Apply",
+        )
+        self._apply_button = next(
+            (
+                button
+                for button in self.bottomBar.findChildren(QtWidgets.QPushButton)
+                if button.text() == "Apply"
+            ),
+            None,
+        )
+        if self._apply_button is not None:
+            self._apply_button.setEnabled(False)
 
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        bg = QColor(COLOR_ACCENT_WHITE if self._hover_active else COLOR_ACCENT_MAIN)
+    def _add_scope_controls(self):
+        layout = QtWidgets.QHBoxLayout()
+        layout.setSpacing(util.DPI(4))
+        label = QtWidgets.QLabel(_t("Keyframes"), self.mainContent)
+        label.setStyleSheet(
+            "color: {}; font-size: {}px;".format(
+                COLOR_TEXT_SECONDARY, util.DPI(11)
+            )
+        )
+        layout.addWidget(label)
+        layout.addStretch(1)
 
-        painter.setBrush(QBrush(bg))
-        painter.setPen(QPen(QColor("white"), 1))
-        painter.drawRoundedRect(rect, 2, 2)
+        group = QtWidgets.QButtonGroup(self)
+        group.setExclusive(True)
+        for text, all_frames in (
+            (AttributePopup.CURRENT_KEYFRAMES, False),
+            (AttributePopup.ALL_KEYFRAMES, True),
+        ):
+            button = QtWidgets.QPushButton(text, self.mainContent)
+            button.setCheckable(True)
+            _configure_option_button(button, compact=True)
+            font = QtGui.QFont(button.font())
+            font.setBold(True)
+            button.setMinimumWidth(QtGui.QFontMetrics(font).horizontalAdvance(text) + util.DPI(20))
+            _connect_checkable_button(
+                button, self._choose_scope, all_frames
+            )
+            group.addButton(button)
+            layout.addWidget(button)
+            if not all_frames:
+                button.setChecked(True)
+        self._scope_group = group
+        self.mainLayout.addLayout(layout)
 
+    def _build_columns(self):
+        for entry_index, (item, options_map) in enumerate(self.entries):
+            column = QtWidgets.QWidget(self.mainContent)
+            column.setFixedWidth(util.DPI(165))
+            column.setStyleSheet("background: transparent;")
+            layout = QtWidgets.QVBoxLayout(column)
+            layout.setContentsMargins(
+                util.DPI(5), util.DPI(5), util.DPI(5), util.DPI(5)
+            )
+            layout.setSpacing(util.DPI(3))
+
+            object_heading = QtWidgets.QLabel(item.object_label, column)
+            object_heading.setWordWrap(False)
+            object_heading.setStyleSheet(
+                "color: {}; font-size: {}px; background: transparent;".format(
+                    COLOR_TEXT_SECONDARY, util.DPI(11)
+                )
+            )
+            object_heading.setToolTip(item.object_label)
+            layout.addWidget(object_heading)
+
+            attribute_text = item.attribute_label
+            if item.has_mixed_key_values:
+                attribute_text += " *"
+            attribute_heading = QtWidgets.QLabel(attribute_text, column)
+            attribute_heading.setWordWrap(False)
+            attribute_heading.setStyleSheet(
+                "color: {}; font-size: {}px; font-weight: bold; background: transparent;".format(
+                    COLOR_TEXT_SECONDARY, util.DPI(11)
+                )
+            )
+            attribute_heading.setToolTip(item.attribute_label)
+            layout.addWidget(attribute_heading)
+
+            group = QtWidgets.QButtonGroup(self)
+            group.setExclusive(True)
+            self._option_groups.append(group)
+            option_count = 0
+            for option_index, option in enumerate(item.options):
+                if option not in options_map:
+                    continue
+                option_count += 1
+                display_option = (
+                    _rotation_order_option_text(option, item.gimbal_info)
+                    if item.enum_attr == "rotateOrder" else option
+                )
+                button = QtWidgets.QPushButton(display_option, column)
+                button.setCheckable(True)
+                _configure_option_button(button)
+                _connect_checkable_button(
+                    button, self._choose_option, entry_index, option
+                )
+                _add_option_state_indicator(
+                    button,
+                    is_current=option_index in item.current_indices,
+                    is_keyed=option_index in item.marked_indices,
+                )
+                group.addButton(button)
+                layout.addWidget(button)
+            if not option_count:
+                empty = QtWidgets.QLabel(_t("No options"), column)
+                empty.setStyleSheet(
+                    "color: {}; background: transparent;".format(
+                        COLOR_TEXT_SECONDARY
+                    )
+                )
+                layout.addWidget(empty)
+            layout.addStretch(1)
+            self._column_widgets.append(column)
+
+    def _layout_columns(self, screen):
+        while self._columns_grid.count():
+            self._columns_grid.takeAt(0)
+        available_width = util.DPI(700)
+        if screen is not None:
+            available_width = screen.availableGeometry().width() - util.DPI(80)
+        column_step = util.DPI(171)
+        columns_per_row = max(
+            1,
+            min(len(self._column_widgets), available_width // column_step),
+        )
+        for index, column in enumerate(self._column_widgets):
+            self._columns_grid.addWidget(
+                column,
+                index // columns_per_row,
+                index % columns_per_row,
+            )
+
+    def _choose_scope(self, checked, all_frames):
+        if checked:
+            self._all_frames = all_frames
+
+    def _choose_option(self, checked, entry_index, option):
+        if not checked:
+            return
+        self._selected_options[entry_index] = option
+        if self._apply_button is not None:
+            self._apply_button.setEnabled(True)
+
+    def _apply(self):
+        if not self._selected_options:
+            return
+        staged_entries = [
+            (self.entries[index][0], self.entries[index][1], option)
+            for index, option in sorted(self._selected_options.items())
+        ]
+        self.parent_dialog._apply_multi_switch(
+            staged_entries, self._all_frames
+        )
+
+    def _cancel(self):
+        self.parent_dialog._close_multi_switch_dialog(clear_selection=True)
+
+    def reject(self):
+        self._cancel()
+
+    def show_beside(self, widget):
+        position = widget.mapToGlobal(QtCore.QPoint(widget.width(), 0))
+        screen = (
+            QtGui.QGuiApplication.screenAt(position)
+            or QtGui.QGuiApplication.primaryScreen()
+        )
+        self._layout_columns(screen)
+        self.adjustSize()
+        if screen is not None:
+            available = screen.availableGeometry()
+            if position.x() + self.width() > available.right():
+                position.setX(
+                    widget.mapToGlobal(QtCore.QPoint(0, 0)).x() - self.width()
+                )
+            position.setX(
+                max(
+                    available.left(),
+                    min(position.x(), available.right() - self.width()),
+                )
+            )
+            position.setY(
+                max(
+                    available.top(),
+                    min(position.y(), available.bottom() - self.height()),
+                )
+            )
+        self.move(position)
+        self.show()
+        self.raise_()
 
 class TargetItemWidget(QWidget):
     def __init__(self, name, list_ref):
@@ -1895,7 +2557,8 @@ class SetupTargetsDialog(FloatingWidget):
         new_dict = {}
 
         for target in order:
-            new_dict[target] = self.objects_dict.get(target, fallback)
+            new_dict[target] = dict(self.objects_dict.get(target, fallback))
+            new_dict[target]["xform_target"] = target
 
         self.objects_dict.clear()
         self.objects_dict.update(new_dict)
@@ -2002,98 +2665,190 @@ class Timeline(QWidget):
 
 
 class SwitchExecutor(object):
+    ROTATE_AXES = ("rotateX", "rotateY", "rotateZ")
+
     def __init__(self, owner):
         self.owner = owner
 
-    @staticmethod
-    def operation_matrix(operation):
-        return Maya.matrix(operation.xform_target)
-
-    @staticmethod
-    def apply_operation(operation, matrix=None):
-        if not operation.is_valid():
-            cmds.warning("Invalid switch operation: {} -> {}".format(operation.xform_target, operation.plug))
-            return False
-
-        matrix = matrix or Maya.matrix(operation.xform_target)
-
-        cmds.setAttr(operation.plug, operation.value)
-        Maya.set_matrix(operation.xform_target, matrix)
-
-        return True
-
     def collect_frames(self, operations, all_frames, timeline_selection, current_frames):
         current_time = cmds.currentTime(query=True)
-
         if not all_frames and not timeline_selection:
             return [current_time]
-
         frames = set()
+        for operation in operations:
+            frames.update(Maya.key_times_for_node(operation.xform_target))
+            frames.update(Maya.key_times_for_plug(operation.plug))
+        if timeline_selection:
+            start, end = current_frames
+            frames = {frame for frame in frames if start <= frame < end}
+            return sorted(frames)
+        return sorted(frames) or [current_time]
 
-        with UndoDisabled():
+    def _rotate_order_fast_eligible(self, operation):
+        node = operation.xform_target
+        if operation.attr != "rotateOrder" or operation.attr_node != node:
+            return False
+        # Animated order and non-curve drivers need evaluated world transforms.
+        if cmds.getAttr(operation.plug, lock=True) or cmds.listConnections(
+            operation.plug, source=True, destination=False
+        ):
+            return False
+        for axis in self.ROTATE_AXES:
+            plug = Maya.plug(node, axis)
+            if cmds.getAttr(plug, lock=True):
+                return False
+            sources = cmds.listConnections(plug, source=True, destination=False) or []
+            if sources and (len(sources) != 1 or cmds.nodeType(sources[0]) != "animCurveTA"):
+                return False
+        return True
+
+    def _prepare_rotation(self, operation):
+        """Read every original value before editing any curve; never scrub time."""
+        node = operation.xform_target
+        old_order = int(cmds.getAttr(operation.plug))
+        new_order = int(operation.value)
+        times = set()
+        for axis in self.ROTATE_AXES:
+            times.update(Maya.key_times_for_plug(Maya.plug(node, axis)))
+        keyed = bool(times)
+        samples = []
+        to_radians = om.MAngle(1.0, om.MAngle.uiUnit()).asRadians()
+        from_radians = om.MAngle(1.0, om.MAngle.kRadians).asUnits(om.MAngle.uiUnit())
+        previous = None
+        for frame in sorted(times) if keyed else [None]:
+            values = [cmds.getAttr(Maya.plug(node, axis), **({"time": frame} if keyed else {}))
+                      for axis in self.ROTATE_AXES]
+            rotation = om.MEulerRotation(*(list(v * to_radians for v in values) + [old_order]))
+            rotation.reorderIt(new_order)
+            if previous is not None:
+                rotation = rotation.closestSolution(previous)
+            previous = rotation
+            samples.append((frame, [rotation.x * from_radians, rotation.y * from_radians,
+                                    rotation.z * from_radians]))
+        return operation, keyed, samples
+
+    def _apply_rotation(self, prepared):
+        operation, keyed, samples = prepared
+        existing = {axis: Maya.key_times_for_plug(Maya.plug(operation.xform_target, axis))
+                    for axis in self.ROTATE_AXES}
+        for frame, values in samples:
+            for axis, value in zip(self.ROTATE_AXES, values):
+                plug = Maya.plug(operation.xform_target, axis)
+                if keyed:
+                    if frame in existing[axis]:
+                        cmds.keyframe(plug, edit=True, time=(frame, frame), valueChange=value)
+                    else:
+                        cmds.setKeyframe(plug, time=(frame, frame), value=value)
+                else:
+                    cmds.setAttr(plug, value)
+        cmds.setAttr(operation.plug, operation.value)
+
+    @staticmethod
+    def _write_attribute(operation, frame, keyed):
+        if keyed or Maya.key_times_for_plug(operation.plug):
+            cmds.setKeyframe(operation.plug, time=(frame, frame), value=operation.value,
+                             outTangentType="step")
+        else:
+            cmds.setAttr(operation.plug, operation.value)
+
+    def apply_requests(self, requests, timeline_selection, selected_range):
+        """Capture the entire batch before writing, then compensate parent first."""
+        scheduled = {}
+        fast = []
+        seen = {}
+        for operations, all_frames in requests:
             for operation in operations:
                 if not operation.is_valid():
                     continue
-
-                frames.update(Maya.key_times_for_node(operation.xform_target))
-                frames.update(Maya.key_times_for_plug(operation.plug))
-
-        if timeline_selection:
-            start, end = current_frames
-            frames = {frame for frame in frames if start <= frame <= end}
-
-        return sorted(frames) or [current_time]
-
-    def apply_once(self, operations):
-        for operation in operations:
-            self.apply_operation(operation)
-
-    def apply_on_frames(self, operations, frames):
-        current_time = cmds.currentTime(q=True)
+                if operation.plug in seen and seen[operation.plug] != operation.value:
+                    raise ValueError("Conflicting choices for {}".format(operation.plug))
+                seen[operation.plug] = operation.value
+                if (self.owner.fast_rotation_order and not timeline_selection
+                        and self._rotate_order_fast_eligible(operation)):
+                    if not any(item[0].plug == operation.plug for item in fast):
+                        fast.append(self._prepare_rotation(operation))
+                    continue
+                frames = self.collect_frames([operation], all_frames,
+                                             timeline_selection, selected_range)
+                keyed = all_frames or timeline_selection
+                for frame in frames:
+                    scheduled.setdefault(frame, []).append((operation, keyed))
+        if not scheduled and not fast:
+            return set()
+        current_time = cmds.currentTime(query=True)
+        auto_key = cmds.autoKeyframe(query=True, state=True)
         marker = None
-
+        snapshots = {}
         try:
-            marker = Timeline.create([frames[0], frames[-1] + 1])
-
-            matrices = {}
-
-            with UndoDisabled():
-                with ProgressBar(len(frames), status="Saving Positions...", interruptable=True) as progress:
-                    for i, frame in enumerate(frames, 1):
-                        if progress.step("Saving Positions (%s/%s)..." % (i, len(frames))):
-                            return
-
-                        cmds.currentTime(frame)
-                        frame_data = []
-
-                        for operation in operations:
-                            if operation.is_valid():
-                                frame_data.append((operation, self.operation_matrix(operation)))
-
-                        matrices[frame] = frame_data
-
-            with ProgressBar(len(frames), status="Applying Positions...", interruptable=False) as progress:
-                for i, frame in enumerate(frames, 1):
+            if scheduled:
+                marker = Timeline.create([min(scheduled), max(scheduled) + 1])
+                with UndoDisabled():
+                    with ProgressBar(len(scheduled), status="Saving Positions...") as progress:
+                        for frame, entries in sorted(scheduled.items()):
+                            if progress.step():
+                                return set()
+                            cmds.currentTime(frame)
+                            snapshots[frame] = {op.xform_target: Maya.matrix(op.xform_target)
+                                                for op, _ in entries}
+            cmds.autoKeyframe(state=False)
+            for prepared in fast:
+                self._apply_rotation(prepared)
+            with ProgressBar(len(scheduled), status="Applying Positions...", interruptable=False) as progress:
+                for frame, entries in sorted(scheduled.items()):
                     cmds.currentTime(frame)
-
-                    for operation, matrix in matrices.get(frame, []):
-                        self.apply_operation(operation, matrix=matrix)
-
-                    progress.step("Applying Positions (%s/%s)..." % (i, len(frames)))
-
+                    # All switches first, then one compensation per target. This
+                    # prevents one staged channel from invalidating another.
+                    for operation, keyed in entries:
+                        self._write_attribute(operation, frame, keyed)
+                    def depth(target):
+                        paths = cmds.ls(target, long=True) or [target]
+                        return paths[0].count("|")
+                    for target in sorted(snapshots[frame], key=depth):
+                        Maya.set_matrix(target, snapshots[frame][target])
+                        target_entries = [(op, keyed) for op, keyed in entries if op.xform_target == target]
+                        for attr in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"):
+                            plug = Maya.plug(target, attr)
+                            if (any(keyed for _, keyed in target_entries) or auto_key
+                                    or Maya.key_times_for_plug(plug)):
+                                if cmds.getAttr(plug, settable=True):
+                                    cmds.setKeyframe(plug, time=(frame, frame))
+                    progress.step()
         finally:
-            cmds.currentTime(current_time)
-
+            cmds.autoKeyframe(state=auto_key)
+            if scheduled:
+                cmds.currentTime(current_time)
             if marker:
                 marker.delete_marker()
+        return {op.xform_target for entries in scheduled.values() for op, _ in entries} | {item[0].xform_target for item in fast}
 
-    def apply(self, operations, frames):
-        if len(frames) > 1:
-            self.apply_on_frames(operations, frames)
-        else:
-            cmds.currentTime(frames[0])
-            self.apply_once(operations)
 
+class _ContentHeightScrollArea(QtWidgets.QScrollArea):
+    """A scroll area that collapses fully and derives height from its content."""
+
+    def minimumSizeHint(self):
+        return QtCore.QSize(0, 0)
+
+    def contentSizeHint(self):
+        content = self.widget()
+        if content is None:
+            return QtCore.QSize(0, 0)
+        # With widgetResizable enabled, the content widget may already have
+        # been collapsed to the viewport. Its layout retains the intrinsic
+        # size of the child rows and avoids that sizing feedback loop.
+        content_layout = content.layout()
+        content_hint = (
+            content_layout.sizeHint()
+            if content_layout is not None
+            else content.sizeHint()
+        )
+        frame_size = self.frameWidth() * 2
+        return QtCore.QSize(
+            max(0, content_hint.width()) + frame_size,
+            max(0, content_hint.height()) + frame_size,
+        )
+
+    def sizeHint(self):
+        return self.contentSizeHint()
 
 class SpaceSwitchAlehaWidget(FloatingWidget):
     ROTATE_ORDER_OPTIONS = ["xyz", "yzx", "zxy", "xzy", "yxz", "zyx"]
@@ -2103,9 +2858,13 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         FloatingWidget.__init__(self, popup=popup, parent=parent)
 
         self._active_popup = None
+        self._multi_switch_dialog = None
+        self._last_multi_modifier_state = None
         self._popup_pending_item = None
         self._is_ui_hovered = False
         self._active_switch_widgets = {}
+        self._geometry_anchor_bottom = None
+        self._geometry_fit_pending = True
         self._previous_selection = []
         self._switch_data = {}
 
@@ -2114,7 +2873,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._popup_timer.setInterval(100)
         self._popup_timer.timeout.connect(self._show_pending_popup)
 
-        self.settings = QSettings(DATA.get("AUTHOR", {}).get("NAME"), DATA.get("TOOL"))
+        self.settings = QSettings(DATA.get("AUTHOR", {}).get("name", "Alehaaa"), DATA.get("TOOL"))
         self._load_persistent_settings()
 
         self.analyzer = GimbalAnalyzer()
@@ -2126,45 +2885,320 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._create_layouts()
         self._create_selection_layout()
         self._add_callbacks()
+        self._modifier_timer = QTimer(self)
+        self._modifier_timer.setInterval(80)
+        self._modifier_timer.timeout.connect(self._poll_multi_select_modifier)
+        self._modifier_timer.start()
         self.refresh(force=True)
 
+    def _poll_multi_select_modifier(self):
+        """Refresh once whenever the directly queried Ctrl/Cmd state changes."""
+        if not self.isVisible():
+            self._last_multi_modifier_state = None
+            return
+        modifier_held = _multi_select_modifier_held()
+        if modifier_held == self._last_multi_modifier_state:
+            return
+        self._last_multi_modifier_state = modifier_held
+        self._refresh_multi_checkbox_visibility()
+
+    def _refresh_multi_checkbox_visibility(self):
+        if not self.isVisible():
+            return
+        for item, _options_map in self._active_switch_widgets.values():
+            if util.is_valid_widget(item):
+                item._update_multi_checkbox_visibility()
+
+    def _selected_multi_entries(self):
+        """Return checked enum rows and their option maps in display order."""
+        entries = []
+        for _key, (item, options_map) in self._active_switch_widgets.items():
+            if (
+                util.is_valid_widget(item)
+                and item.is_enum
+                and item.multi_checkbox.isChecked()
+            ):
+                entries.append((item, options_map))
+        return entries
+
+    def _expanded_multi_entries(self, selected_entries=None):
+        """Expand collapsed rows into independently configurable targets."""
+        entries = []
+        for item, options_map in (
+            selected_entries
+            if selected_entries is not None
+            else self._selected_multi_entries()
+        ):
+            if len(item.objects_map) <= 1:
+                entries.append((item, options_map))
+                continue
+            for target, object_data in item.objects_map.items():
+                staged_item = _StagedAttributeEntry(
+                    item, target, object_data
+                )
+                staged_options = self._build_options_map(
+                    staged_item.objects_map
+                )
+                entries.append((staged_item, staged_options))
+        return entries
+
+    def _on_attribute_multi_checked(self, item, checked):
+        """Update the staged multi-switch UI without changing the scene."""
+        self._popup_timer.stop()
+        self._popup_pending_item = None
+        self._close_active_popup()
+
+        selected_entries = self._selected_multi_entries()
+        entries = self._expanded_multi_entries(selected_entries)
+        self._close_multi_switch_dialog(clear_selection=False)
+        if len(entries) < 2:
+            return
+
+        self._multi_switch_dialog = MultiAttributeSwitchDialog(self, entries)
+        anchor = (
+            item
+            if checked and util.is_valid_widget(item)
+            else selected_entries[-1][0]
+        )
+        self._multi_switch_dialog.show_beside(anchor)
+        self._update_interaction_state(True, force=True)
+
+    def _close_multi_switch_dialog(self, clear_selection=False):
+        """Close the staged dialog and optionally clear all checked rows."""
+        dialog = getattr(self, "_multi_switch_dialog", None)
+        self._multi_switch_dialog = None
+        if dialog and util.is_valid_widget(dialog):
+            dialog.hide()
+            dialog.deleteLater()
+
+        if clear_selection:
+            for item, _options_map in self._selected_multi_entries():
+                item.multi_checkbox.blockSignals(True)
+                item.multi_checkbox.setChecked(False)
+                item.multi_checkbox.blockSignals(False)
+                item._update_multi_checkbox_visibility()
+                item.update()
+        self._update_interaction_state(self._is_cursor_within_bounds(), force=True)
+
+    @staticmethod
+    def _new_attribute_container():
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(util.DPI(1))
+        layout.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
+        return container, layout
+
+    def _update_attribute_area_geometry(self):
+        """Notify Qt after atomically replacing the attribute content."""
+        self.enums_layout.invalidate()
+        self.enums_layout.activate()
+        self.enums_container.adjustSize()
+        self.enums_container.updateGeometry()
+        self._update_attribute_scroll_minimum_height()
+        self.attributes_scroll.updateGeometry()
+        self.mainLayout.invalidate()
+        self.mainLayout.activate()
+        self._refresh_attribute_scrollbar_margin()
+
+    def _update_attribute_scroll_minimum_height(self):
+        """Fit at least one complete enum row whenever rows are available."""
+        first_item = self.enums_layout.itemAt(0)
+        first_widget = first_item.widget() if first_item is not None else None
+        if first_widget is None:
+            self.attributes_scroll.setMinimumHeight(0)
+            return
+
+        first_widget.ensurePolished()
+        item_layout = first_widget.layout()
+        if item_layout is not None:
+            item_layout.activate()
+        row_height = max(
+            first_widget.sizeHint().height(),
+            first_widget.minimumSizeHint().height(),
+        )
+        self.attributes_scroll.setMinimumHeight(
+            row_height + (self.attributes_scroll.frameWidth() * 2)
+        )
+
+    def _update_attribute_scrollbar_margin(self, minimum, maximum):
+        """Keep enum rows clear of an overlay-style vertical scrollbar."""
+        right_margin = 0
+        if maximum > minimum:
+            scrollbar = self.attributes_scroll.verticalScrollBar()
+            right_margin = scrollbar.sizeHint().width() + util.DPI(2)
+        self.enums_layout.setContentsMargins(0, 0, right_margin, 0)
+
+    def _refresh_attribute_scrollbar_margin(self):
+        scrollbar = self.attributes_scroll.verticalScrollBar()
+        self._update_attribute_scrollbar_margin(
+            scrollbar.minimum(), scrollbar.maximum()
+        )
+
+    def _replace_attribute_content(self, switch_data):
+        """Build a complete replacement off-screen, then swap it in once."""
+        new_container, new_layout = self._new_attribute_container()
+        new_widgets = {}
+
+        for enum_name, data in (switch_data or {}).items():
+            self._create_switch_item(
+                enum_name,
+                data,
+                target_layout=new_layout,
+                target_registry=new_widgets,
+            )
+
+        old_container = self.attributes_scroll.takeWidget()
+        self.enums_container = new_container
+        self.enums_layout = new_layout
+        self._active_switch_widgets = new_widgets
+        self.attributes_scroll.setWidget(new_container)
+        if old_container is not None:
+            old_container.deleteLater()
+
+        self._update_attribute_area_geometry()
+
+    def _fit_to_available_screen(self):
+        """Fit content up to the available screen, then rely on scrolling."""
+        screen = QtGui.QGuiApplication.screenAt(self.frameGeometry().center())
+        if screen is None:
+            screen = QtGui.QGuiApplication.screenAt(QtGui.QCursor.pos())
+        screen = screen or QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        screen_margin = util.DPI(10)
+        max_height = max(
+            util.DPI(120), available.height() - (screen_margin * 2)
+        )
+        self.setMaximumHeight(max_height)
+
+        # Clear the limit from a previous (possibly empty) refresh before
+        # asking Qt for the new content-preferred geometry.
+        self.attributes_scroll.setMaximumHeight(16777215)
+        self.attributes_scroll.updateGeometry()
+
+        # Measure the complete window chrome first. This includes the selection
+        # header, layout margins, and the optional persistent-window bottom bar.
+        self.mainLayout.invalidate()
+        self.mainLayout.activate()
+        if self.bottomBar and util.is_valid_widget(self.bottomBar):
+            bottom_layout = self.bottomBar.layout()
+            if bottom_layout:
+                bottom_layout.activate()
+            self.bottomBar.adjustSize()
+            self.bottomBar.updateGeometry()
+        self.root_layout.invalidate()
+        self.root_layout.activate()
+
+        scroll_height = self.attributes_scroll.contentSizeHint().height()
+        preferred_height = self.root_layout.sizeHint().height()
+        chrome_height = max(0, preferred_height - scroll_height)
+        available_scroll_height = max(0, max_height - chrome_height)
+        self.attributes_scroll.setMaximumHeight(
+            min(scroll_height, available_scroll_height)
+        )
+        self.attributes_scroll.updateGeometry()
+
+        self.mainLayout.invalidate()
+        self.mainLayout.activate()
+        self.root_layout.invalidate()
+        self.root_layout.activate()
+        desired_height = min(self.root_layout.sizeHint().height(), max_height)
+        anchored_bottom = self._geometry_anchor_bottom
+        if anchored_bottom is None:
+            anchored_bottom = self.frameGeometry().bottom()
+        self.resize(self.width(), desired_height)
+
+        # Keep the bottom edge anchored: content grows upward and collapses
+        # downward, which also preserves placement above the toolbar.
+        min_y = available.top() + screen_margin
+        max_y = available.bottom() - desired_height - screen_margin + 1
+        anchored_y = anchored_bottom - desired_height + 1
+        self.move(self.x(), max(min_y, min(anchored_y, max_y)))
+        self._geometry_anchor_bottom = None
+
+    def _request_geometry_fit(self):
+        """Fit now when visible, or once Qt has polished the window for show."""
+        self._geometry_fit_pending = True
+        if not self.isVisible():
+            return
+        self._fit_to_available_screen()
+        self._geometry_fit_pending = False
+
     def _create_layouts(self):
+        """Builds the main container layouts."""
         self.mainContent.setMinimumWidth(util.DPI(220))
-        self.mainContent.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.mainContent.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.mainContent.customContextMenuRequested.connect(self._show_context_menu)
 
-        self.enums_layout = QVBoxLayout()
-        self.enums_layout.setSpacing(util.DPI(1))
-
-        self.mainLayout.addLayout(self.enums_layout)
+        self.attributes_scroll = _ContentHeightScrollArea(self.mainContent)
+        self.attributes_scroll.setMinimumSize(0, 0)
+        self.attributes_scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred
+        )
+        self.attributes_scroll.setWidgetResizable(True)
+        self.attributes_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.attributes_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.attributes_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self.attributes_scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        self.enums_container, self.enums_layout = self._new_attribute_container()
+        self.attributes_scroll.setWidget(self.enums_container)
+        self.attributes_scroll.verticalScrollBar().rangeChanged.connect(
+            self._update_attribute_scrollbar_margin
+        )
+        self.mainLayout.addWidget(self.attributes_scroll)
         self.mainLayout.addStretch(1)
 
     def _create_selection_layout(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(util.DPI(5))
-        layout.setContentsMargins(0, util.DPI(6), 0, util.DPI(8))
+        """Builds the header area showing tool title and current status."""
+        selection_layout = QtWidgets.QVBoxLayout()
+        selection_layout.setSpacing(util.DPI(5))
+        selection_layout.setContentsMargins(0, util.DPI(6), 0, util.DPI(8))
 
-        title = QLabel("Selection")
-        title.setStyleSheet(
-            "font-size: %spx; color: %s; font-weight: bold; background: transparent;"
-            % (util.DPI(18), self.TEXT_COLOR)
+        title_layout = QtWidgets.QHBoxLayout()
+        title_layout.setSpacing(util.DPI(6))
+        title_layout.setContentsMargins(0, 0, 0, 0)
+
+        title_icon_size = util.DPI(25)
+        title_icon = QtWidgets.QLabel()
+        title_icon.setFixedSize(title_icon_size, title_icon_size)
+        title_icon.setPixmap(
+            QtGui.QIcon(util.return_icon_path("spaceswitch.svg")).pixmap(
+                title_icon_size,
+                title_icon_size,
+            )
         )
-        title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        title.setWordWrap(False)
-        title.setFixedHeight(title.fontMetrics().height() + 2)
+        title_icon.setAlignment(QtCore.Qt.AlignCenter)
 
-        self.selection_label = QLabel("No switches for selection")
+        selection_title = QtWidgets.QLabel("Selection")
+        selection_title.setStyleSheet(
+            "font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR)
+        )
+        selection_title.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        selection_title.setWordWrap(False)
+        selection_title.setFixedHeight(selection_title.fontMetrics().height() + 2)
+
+        title_layout.addWidget(title_icon)
+        title_layout.addWidget(selection_title, 1)
+
+        self.selection_label = QtWidgets.QLabel(_t("No switches for selection"))
         self.selection_label.setStyleSheet("color: %s; background: transparent;" % self.TEXT_COLOR)
 
-        layout.addWidget(title)
-        layout.addWidget(self.selection_label)
+        selection_layout.addLayout(title_layout)
+        selection_layout.addWidget(self.selection_label)
 
-        self.mainLayout.insertLayout(0, layout)
+        self.mainLayout.insertLayout(0, selection_layout)
 
     def _load_persistent_settings(self):
         self.namespace_display = self._setting_bool("namespace_display", False)
         self.all_frames = self._setting_bool("all_frames", False)
         self.euler_filter = self._setting_bool("euler_filter", True)
+        self.fast_rotation_order = self._setting_bool("fast_rotation_order", True)
         self.show_rotate_order = self._setting_bool("show_rotate_order", True)
 
     def _setting_bool(self, key, default):
@@ -2246,6 +3280,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.setBottomBar(closeButton=not self._auto_close_active)
 
     def refresh(self, force=False):
+        self._popup_timer.stop()
+        self._popup_pending_item = None
+        self._close_multi_switch_dialog(clear_selection=True)
         self._close_active_popup()
 
         current_selection = Maya.selection(long=False)
@@ -2258,39 +3295,30 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._rebuild_active_widgets()
 
     def _rebuild_active_widgets(self):
-        self._clear_layout(self.enums_layout)
-        self._active_switch_widgets.clear()
-
-        if not self._previous_selection:
-            self.selection_label.setVisible(True)
-            self.adjustSize()
-            self._refresh_footer()
-            return
-
         try:
-            self._switch_data = self.catalog_builder.combined_catalog(self._previous_selection)
-
-            if not self._switch_data:
-                self.selection_label.setVisible(True)
-            else:
-                self.selection_label.setVisible(False)
-
-                for enum_name, data in self._switch_data.items():
-                    self._create_switch_item(enum_name, data)
-
+            self._switch_data = self.catalog_builder.combined_catalog(self._previous_selection) if self._previous_selection else {}
+            self._replace_attribute_content(self._switch_data)
+            self.selection_label.setVisible(not bool(self._switch_data))
         except Exception as exc:
             cmds.warning("Error rebuilding SpaceSwitch widgets: {}".format(exc))
         finally:
             self._update_interaction_state(self._is_ui_hovered, force=True)
             self._refresh_footer()
-            self.adjustSize()
+            self._request_geometry_fit()
 
-    def _create_switch_item(self, enum_name, data):
+    def showEvent(self, event):
+        FloatingWidget.showEvent(self, event)
+        if self._geometry_fit_pending:
+            self._fit_to_available_screen()
+            self._geometry_fit_pending = False
+
+    def _create_switch_item(self, enum_name, data, target_layout=None, target_registry=None):
         target_nodes = list(data["objects"].keys())
         display_name = self._format_object_name(target_nodes)
 
         attr_item = AttributeItem(
-            "{} {}".format(display_name, data["long"].title()),
+            display_name,
+            data["long"].title(),
             enum_name,
             target_nodes,
             data["objects"],
@@ -2304,8 +3332,10 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         )
 
         options_map = self._build_options_map(data["objects"])
-        self._active_switch_widgets[(enum_name, tuple(target_nodes))] = (attr_item, options_map)
-        self.enums_layout.insertWidget(0, attr_item)
+        registry = self._active_switch_widgets if target_registry is None else target_registry
+        layout = self.enums_layout if target_layout is None else target_layout
+        registry[(enum_name, tuple(target_nodes))] = (attr_item, options_map)
+        layout.insertWidget(0, attr_item)
 
     def _build_options_map(self, objects_data):
         options_map = {}
@@ -2359,44 +3389,53 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     def formatXformTooltipObjects(objects):
         return "<html>Current xform target/s:<br>%s<br><br><b>Right-click to modify...</b></html>" % "<br>".join(objects)
 
-    def _apply_attribute_switch(self, enum_value, enum_attr, options_and_objects, all_frames_override=None):
-        all_frames_setting = all_frames_override if all_frames_override is not None else self.all_frames
+    def analyze_group_gimbal(self, objects_data):
+        results = []
+        for node, data in objects_data.items():
+            if not data.get("gimbal"):
+                data["gimbal"] = self.analyzer.analyze(data.get("xform_target", node))
+            results.append(data["gimbal"])
+        orders = self.ROTATE_ORDER_OPTIONS
+        scores = [max([r[order]["percentage"] for r in results if order in r] or [0])
+                  for order in orders]
+        labels = self.analyzer.classify(scores)
+        return {order: {"percentage": score, "label": label}
+                for order, score, label in zip(orders, scores, labels)}
 
-        if enum_attr == "rotateOrder":
-            if isinstance(enum_value, (str, bytes)) and " " in enum_value.strip():
-                enum_value = enum_value.split(" ")[0]
-            all_frames_setting = True
+    def _apply_multi_switch(self, staged_entries, all_frames):
+        requests = [(option, item.enum_attr, options_map, all_frames)
+                    for item, options_map, option in staged_entries if option in options_map]
+        self._close_multi_switch_dialog(clear_selection=True)
+        self._apply_requests(requests)
 
-        data = options_and_objects[enum_value]
-        value_index = data.get("index", enum_value)
-        operations = [op.set_value(value_index) for op in data.get("operations", [])]
-        operations = [op for op in operations if op.is_valid()]
-
-        if not operations:
+    def _apply_requests(self, requests):
+        prepared = []
+        targets = set()
+        for value, attr, options_map, all_frames in requests:
+            data = options_map[value]
+            operations = [op for op in data.get("operations", []) if op.is_valid()]
+            if operations:
+                prepared.append((operations, all_frames or attr == "rotateOrder"))
+                targets.update(op.xform_target for op in operations)
+        if not prepared:
             return
-
-        timeline_selection = cmds.timeControl("timeControl1", q=True, rv=True)
-        current_frames = cmds.timeControl("timeControl1", q=True, ra=True)
-
-        frames = self.executor.collect_frames(
-            operations=operations,
-            all_frames=all_frames_setting,
-            timeline_selection=timeline_selection,
-            current_frames=current_frames,
-        )
-
+        timeline = mel.eval('$tmp = $gPlayBackSlider')
+        selected = cmds.timeControl(timeline, q=True, rangeVisible=True)
+        frame_range = cmds.timeControl(timeline, q=True, rangeArray=True)
         self._remove_callbacks()
-
         try:
             with UndoChunk("SpaceSwitch"):
                 with RefreshSuspended():
-                    self.executor.apply(operations, frames)
-
-                    if self.euler_filter:
-                        self.apply_euler_filter([op.xform_target for op in operations])
+                    changed = self.executor.apply_requests(prepared, selected, frame_range)
+                    if self.euler_filter and changed:
+                        self.apply_euler_filter(changed)
         finally:
             self._add_callbacks()
             self.refresh(force=True)
+
+    def _apply_attribute_switch(self, enum_value, enum_attr, options_and_objects, all_frames_override=None):
+        all_frames = self.all_frames if all_frames_override is None else all_frames_override
+        self._apply_requests([(enum_value, enum_attr, options_and_objects, all_frames)])
 
     def apply_euler_filter(self, targets):
         curves = []
@@ -2417,8 +3456,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             cmds.filterCurve(*curves)
 
     def apply_active_changes(self):
-        for (enum_attr, _), (attr_item, options_map) in self._active_switch_widgets.items():
-            self._apply_attribute_switch(attr_item.currentText(), enum_attr, options_map)
+        self._apply_requests([(item.currentText(), attr, options, self.all_frames)
+                              for (attr, _), (item, options) in list(self._active_switch_widgets.items())
+                              if item.currentText() in options])
 
     def _update_interaction_state(self, is_active, force=False):
         if not is_active:
@@ -2471,6 +3511,11 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         FloatingWidget.leaveEvent(self, event)
 
     def _handle_attr_hover(self, item):
+        if item._multi_select_modifier_held() or self._selected_multi_entries():
+            self._popup_timer.stop()
+            self._popup_pending_item = None
+            self._close_active_popup()
+            return
         self._popup_pending_item = item
         self._popup_timer.start()
 
@@ -2481,16 +3526,25 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._popup_timer.start()
 
     def _show_pending_popup(self):
+        """Displays the attribute choice popup beside the hovered row."""
+        if self._selected_multi_entries():
+            self._popup_pending_item = None
+            self._close_active_popup()
+            return
+
+        # Keep the popup while the cursor is over it or an option drag is active.
         if not self._popup_pending_item or not util.is_valid_widget(self._popup_pending_item):
             popup = self._active_popup
-
-            if popup and util.is_valid_widget(popup) and not popup.underMouse():
-                popup.hide()
-
+            if not popup or not util.is_valid_widget(popup):
+                return
+            if popup._drag_active or popup.underMouse():
+                return
+            self._close_active_popup()
             return
 
         item = self._popup_pending_item
 
+        # If current is same item and visible, do nothing
         if (
             self._active_popup
             and util.is_valid_widget(self._active_popup)
@@ -2499,19 +3553,26 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         ):
             return
 
+        # Otherwise, switch
         self._close_active_popup()
 
+        if item.enum_attr == "rotateOrder":
+            item.gimbal_info = self.analyze_group_gimbal(item.objects_map)
         self._active_popup = AttributePopup(item, item.on_select)
+        item._set_popup_active(True)
         self._active_popup.show_beside(item)
 
-        item._hover_active = True
-        item.update()
-
     def _close_active_popup(self):
-        if self._active_popup and util.is_valid_widget(self._active_popup):
-            self._active_popup.hide()
-            self._active_popup.deleteLater()
-
+        """Safely removes the current popup."""
+        popup = getattr(self, "_active_popup", None)
+        if not popup or not util.is_valid_widget(popup):
+            self._active_popup = None
+            return
+        item = popup.item_widget
+        if util.is_valid_widget(item):
+            item._set_popup_active(False)
+        popup.hide()
+        popup.deleteLater()
         self._active_popup = None
 
     def _show_change_target_dialog(self, sender, data):
@@ -2521,6 +3582,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             cmds.select(selection, replace=True)
             self._add_callbacks()
             sender.setToolTip(self.formatXformTooltipObjects(objects))
+            for key, (item, _) in list(self._active_switch_widgets.items()):
+                if item is sender:
+                    self._active_switch_widgets[key] = (item, self._build_options_map(data["objects"]))
 
         self._remove_callbacks()
 
@@ -2557,6 +3621,14 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
         self.context_menu.addSeparator()
 
+        fast_action = self.context_menu.addAction(
+            "Fast Rotation Order",
+            description="Convert plain rotation curves without moving the playhead.",
+        )
+        fast_action.setCheckable(True)
+        fast_action.setChecked(self.fast_rotation_order)
+        fast_action.toggled.connect(lambda state: self.set_setting("fast_rotation_order", state))
+
         about_action = self.context_menu.addAction(
             "About",
             description="General information about SpaceSwitch and the author.",
@@ -2578,6 +3650,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             widgets.QAboutDialog.dlg_instance.finished.connect(lambda *args: self._resume_auto_close())
 
     def closeEvent(self, event):
+        self._modifier_timer.stop()
+        self._popup_timer.stop()
+        self._close_multi_switch_dialog(clear_selection=True)
         self._close_active_popup()
         self._cb.clear()
         FloatingWidget.closeEvent(self, event)

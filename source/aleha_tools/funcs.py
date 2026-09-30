@@ -535,7 +535,8 @@ def close_UI(ui, confirm=True):
                 ui.close()
             else:
                 return
-    close_all_Windows(ui.objectName())
+    from . import lifecycle
+    lifecycle.cleanup(close_tools=False)
 
 
 # Open Tools
@@ -647,7 +648,7 @@ def compile_version():
             )
 
             cmds.evalDeferred(
-                "import aleha_tools.cams as cams;from importlib import reload;reload(cams);cams.show()",
+                "import aleha_tools;aleha_tools.reload()",
                 lowestPriority=True,
             )
 
