@@ -1,5 +1,8 @@
-import maya.cmds as cmds
-import os
+"""Aim camera rig creation from the active viewport and Maya selection."""
+from maya import cmds
+
+from ._camera_rig import (activate_camera, camera_container, camera_transform,
+                          camera_undo, ensure_string_attribute)
 
 
 class aimCam:
@@ -7,55 +10,34 @@ class aimCam:
         self.create_aim_cam()
 
     def create_aim_cam(self):
-        ori_cam = cmds.lookThru(q=1)
-        sel = cmds.ls(sl=1)
+        selected = cmds.ls(selection=True, long=True) or []
+        if not selected:
+            cmds.warning("First, select an object for the Aim Cam to point to.")
+            return None
+        source, _ = camera_transform(cmds.lookThru(q=True))
+        short = source.rsplit("|", 1)[-1].rsplit(":", 1)[-1]
+        name = ("%s_AIM" % short) if ":" not in source else short
+        with camera_undo("Create Aim Cam"):
+            camera = cmds.duplicate(source, name=name, inputConnections=False)[0]
+            cmds.showHidden(camera)
+            shape = camera_transform(camera)[1]
+            cmds.setAttr(shape + ".renderable", False)
+            for channel in "trs":
+                for axis in "xyz":
+                    cmds.setAttr("%s.%s%s" % (camera, channel, axis), lock=False)
+            ensure_string_attribute(camera, "cams_type", "camera_aim")
 
-        if ori_cam and sel:
-            sel = sel[0]
-            type_of_camera = "camera_aim"
-
-            if ":" in ori_cam:
-                new_name = ori_cam.split(":")[-1]
-                group_name = "%s_AIM_GRP" % new_name
-            else:
-                new_name = "%s_AIM" % ori_cam
-                group_name = "%s_GRP" % new_name
-
-            cmds.undoInfo(openChunk=True)
-            aim_cam = cmds.duplicate(ori_cam, name=new_name, ic=False)
-            aim_cam = aim_cam[0]
-            cmds.showHidden(aim_cam)
-            cmds.setAttr("%s.renderable" % cmds.listRelatives(aim_cam, shapes=True)[0], False)
-            for ax in "xyz":
-                for attr in "trs":
-                    cmds.setAttr("%s.%s%s" % (aim_cam, attr, ax), lock=0)
-
-            cmds.setAttr("%s.cams_type" % aim_cam, type_of_camera, type="string")
-
-            offset = cmds.spaceLocator(n="%s_Offset" % aim_cam)
-            off_grp = cmds.group(offset, name="%s_Offset_GRP" % aim_cam, w=1)
-            cmds.setAttr("%s.cams_aim_offset" % aim_cam, offset[0], type="string")
+            offset = cmds.spaceLocator(name=camera + "_Offset")[0]
+            offset_group = cmds.group(offset, name=camera + "_Offset_GRP",
+                                      world=True)
+            ensure_string_attribute(camera, "cams_aim_offset", offset)
             cmds.hide(offset)
 
-            main_grp = cmds.createNode("dagContainer", name=group_name)
-            main_attrs_to_lock = [i.rsplit(".", 1)[-1] for i in cmds.listAnimatable(main_grp)]
-            for attr in main_attrs_to_lock:
-                cmds.setAttr(main_grp + "." + attr, e=True, keyable=False, lock=True)
-            tools_folder = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-            icon_path = os.path.join(tools_folder, "_icons", type_of_camera + ".png")
-            cmds.setAttr(main_grp + ".iconName", icon_path, type="string")
-
-            cmds.pointConstraint(ori_cam, aim_cam)
-            cmds.pointConstraint(sel, off_grp)
-            cmds.aimConstraint(offset, aim_cam, mo=1)
-
-            cmds.parent(aim_cam, main_grp)
-            cmds.parent(off_grp, main_grp)
-
-            cmds.lookThru(cmds.getPanel(wf=True), aim_cam)
-            cmds.camera(aim_cam, e=1, lt=1)
-
-            cmds.select(aim_cam, replace=True)
-            cmds.undoInfo(closeChunk=True)
-        elif not sel:
-            cmds.warning("First, select an object for the Aim Cam to point to.")
+            container = camera_container(camera, "AIM", "camera_aim")
+            cmds.pointConstraint(source, camera)
+            cmds.pointConstraint(selected[0], offset_group)
+            cmds.aimConstraint(offset, camera, maintainOffset=True)
+            cmds.parent(camera, container)
+            cmds.parent(offset_group, container)
+            activate_camera(camera)
+        return camera

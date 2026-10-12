@@ -590,6 +590,18 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.line.setLineWidth(1)
         self.main_layout.addWidget(self.line)
 
+        # Permanent entry point beside the camera shelf. The compact Cams
+        # strip remains usable when docked into narrow Maya panels.
+        self.tool_hub_btn = widgets.QFlatPushButton(
+            title="Cams Tools",
+            description="Open camera rigs, Space Switcher, HUD and settings.",
+        )
+        self.tool_hub_btn.setIcon(QIcon(util.return_icon_path("cams.svg")))
+        self.tool_hub_btn.setIconSize(QtCore.QSize(int(util.DPI(19)), int(util.DPI(19))))
+        self.tool_hub_btn.setFixedSize(int(util.DPI(27)), int(util.DPI(25)))
+        self.tool_hub_btn.setAccessibleName("Open Cams Tool Hub")
+        self.main_layout.addWidget(self.tool_hub_btn)
+
         self.main_layout.addWidget(self.cams_scroll)
 
         self.dock_ui_btn = widgets.QFlatPushButton(title="Dock to UI", description="Dock Cams back to the Maya UI")
@@ -907,6 +919,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
     def create_connections(self):
         self.dock_ui_btn.clicked.connect(self.dock_to_ui)
+        self.tool_hub_btn.clicked.connect(self.show_tool_hub)
 
         self.settings_btn.triggered.connect(self.settings)
         self.tool_hub_action.triggered.connect(self.show_tool_hub)
@@ -940,6 +953,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
                         "hud_editor_action", "settings_btn", "reload_btn")}
             dialog = widgets.QToolHubDialog(actions, parent=self)
             self.tool_hub_window = dialog
+        dialog.refresh_actions()
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()

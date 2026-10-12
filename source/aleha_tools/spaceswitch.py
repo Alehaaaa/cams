@@ -3369,6 +3369,8 @@ class SwitchExecutor(object):
                 "rotateX", "rotateY", "rotateZ",
                 "scaleX", "scaleY", "scaleZ")
     EPSILON = 1e-5
+    TRAJECTORY_TOLERANCE = 1e-3
+    MAX_TRAJECTORY_PROBES = 520
 
     def __init__(self, owner):
         self.owner = owner
@@ -3660,6 +3662,37 @@ class SwitchExecutor(object):
         return {target: cmds.xform(target, query=True, worldSpace=True, matrix=True)
                 for target in targets}
 
+    @classmethod
+    def _probe_frames(cls, schedule):
+        """Check midpoints without inserting extra keys unless they drift.
+
+        Do not probe the tiny discontinuity bracket around a switch: the local
+        channel jump is necessarily extremely steep there.
+        """
+        result = {}
+        frames = sorted(schedule)
+        for previous, following in zip(frames, frames[1:]):
+            if following - previous < 0.04:
+                continue
+            common = set(schedule[previous]) & set(schedule[following])
+            if common:
+                result[round((previous + following) / 2.0, 6)] = {
+                    node: schedule[previous][node] or schedule[following][node]
+                    for node in common
+                }
+        if len(result) > cls.MAX_TRAJECTORY_PROBES:
+            # Preserve deterministic spatial coverage and bounded evaluation.
+            keys = sorted(result)
+            step = math.ceil(len(keys) / float(cls.MAX_TRAJECTORY_PROBES))
+            result = {frame: result[frame] for frame in keys[::step]}
+        return result
+
+    @classmethod
+    def _pose_errors(cls, frame, snapshot):
+        actual = cls._capture(frame, list(snapshot))
+        return {target: max(abs(a - b) for a, b in zip(actual[target], matrix))
+                for target, matrix in snapshot.items()}
+
     def _begin_write(self, schedule, targets):
         ctx = {
             "current_time": cmds.currentTime(query=True),
@@ -3850,16 +3883,22 @@ class SwitchExecutor(object):
                         slot = schedule.setdefault(frame, {})
                         slot[target] = slot.get(target, False) or job["keyed"]
             targets = sorted({t for slot in schedule.values() for t in slot})
+            probes = self._probe_frames(schedule)
             self.last_range = (min(schedule), max(schedule)) if schedule else None
-            run.set_total(len(schedule) * 2 + 1)
+            run.set_total(len(schedule) * 2 + len(probes) * 3 + 1)
 
             snapshots = {}
+            probe_snapshots = {}
             run.status = "SpaceSwitch: saving positions"
             initial_time = run.main(cmds.currentTime, query=True)
             try:
                 for frame in sorted(schedule):
                     run.check(wrote=False)
                     snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
+                    run.step()
+                for frame in sorted(probes):
+                    run.check(wrote=False)
+                    probe_snapshots[frame] = run.main(self._capture, frame, list(probes[frame]))
                     run.step()
             finally:
                 run.main(cmds.currentTime, initial_time, update=True)
@@ -3874,6 +3913,31 @@ class SwitchExecutor(object):
                     run.check()
                     run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
                     run.step()
+                # Inserting even correct sampled keys can reshape spline or
+                # weighted tangents between them. Refine only measured misses,
+                # and revalidate after subsequent keys can reshape neighbors.
+                for attempt in range(2):
+                    misses = {}
+                    for frame in sorted(probes):
+                        run.check()
+                        errors = run.main(self._pose_errors, frame, probe_snapshots[frame])
+                        if any(value > self.TRAJECTORY_TOLERANCE for value in errors.values()):
+                            misses[frame] = probes[frame]
+                        run.step()
+                    if not misses:
+                        break
+                    for frame in sorted(misses):
+                        run.check()
+                        run.main(self._compensate_frame, frame, misses[frame],
+                                 probe_snapshots[frame], ctx)
+                        run.step()
+                else:
+                    for frame in sorted(probes):
+                        run.check()
+                        errors = run.main(self._pose_errors, frame, probe_snapshots[frame])
+                        if any(value > self.TRAJECTORY_TOLERANCE for value in errors.values()):
+                            raise PoseCompensationError(
+                                "World trajectory could not be preserved at subframe %s" % frame)
             finally:
                 run.main(self._end_write, ctx)
             return set(targets) | {item[0].xform_target for item in fast}

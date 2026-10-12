@@ -20,6 +20,7 @@ from maya import cmds
 from aleha_tools import widgets, base_widgets, cams
 from aleha_tools._tools import HUDWindow
 from aleha_tools._tools import multicams
+from aleha_tools._tools import followCam, aimCam
 
 
 class PreferencesOwner(QtWidgets.QWidget):
@@ -39,6 +40,88 @@ class PreferencesOwner(QtWidgets.QWidget):
 
 
 class CamsUITests(unittest.TestCase):
+    def test_main_window_tool_hub_open_reuses_dialog_and_handles_dead_action(self):
+        class FakeCams(QtWidgets.QWidget):
+            show_tool_hub = cams.QCamsWindow.show_tool_hub
+
+        owner = FakeCams()
+        owner.tool_hub_window = None
+        for key in ("followCam", "aimCam", "multicams", "spaceswitch",
+                    "hud_editor_action", "settings_btn", "reload_btn"):
+            setattr(owner, key, QtWidgets.QAction(key, owner))
+        owner.show_tool_hub()
+        first = owner.tool_hub_window
+        shiboken2.delete(owner.hud_editor_action)
+        owner.show_tool_hub()
+        self.assertIs(owner.tool_hub_window, first)
+        self.assertFalse(first.tool_buttons["hud_editor_action"].isEnabled())
+        owner.hud_editor_action = QtWidgets.QAction("HUD Editor", owner)
+        owner.show_tool_hub()
+        self.assertTrue(first.tool_buttons["hud_editor_action"].isEnabled())
+        owner.close()
+
+    def test_nested_camera_context_menu_tracks_selected_full_dag_path(self):
+        cmds.file(new=True, force=True)
+        camera, _ = cmds.camera(name="menu_camera")
+        group = cmds.group(camera, name="nested_camera_grp")
+        full_camera = cmds.ls(camera, long=True)[0]
+        parent = QtWidgets.QWidget()
+        button = widgets.QFlatCamButton(full_camera, parent)
+        menu = widgets.QFlatOpenMenu("Camera Actions", parent)
+        cmds.select(full_camera, replace=True)
+        button._add_selection_actions(menu)
+        self.assertFalse(button.select_action.isVisible())
+        self.assertTrue(button.deselect_action.isVisible())
+        cmds.select(clear=True)
+        menu2 = widgets.QFlatOpenMenu("Camera Actions", parent)
+        button._add_selection_actions(menu2)
+        self.assertTrue(button.select_action.isVisible())
+        self.assertFalse(button.deselect_action.isVisible())
+        parent.close()
+
+    def test_follow_and_aim_camera_creators_use_scene_selection(self):
+        for creator in (followCam.followCam, aimCam.aimCam):
+            with self.subTest(creator=creator.__name__):
+                cmds.file(new=True, force=True)
+                target = cmds.spaceLocator(name="tracked_item")[0]
+                cmds.select(target, replace=True)
+                original = cmds.ls(type="camera")
+                with mock.patch.object(cmds, "lookThru", side_effect=lambda *a, **kw:
+                                       "persp" if kw.get("q") else None), \
+                     mock.patch.object(cmds, "getPanel", return_value="modelPanel4"):
+                    creator()
+                self.assertGreater(len(cmds.ls(type="camera")), len(original))
+                new_shape = next(shape for shape in cmds.ls(type="camera") if shape not in original)
+                new_cam = cmds.listRelatives(new_shape, parent=True, fullPath=True)[0]
+                expected_type = "camera_follow" if creator is followCam.followCam else "camera_aim"
+                self.assertEqual(cmds.getAttr(new_cam + ".cams_type"), expected_type)
+                if creator is followCam.followCam:
+                    identifier, attribute = cmds.getAttr(new_cam + ".cams_follow_attr").split("|")
+                    group = cmds.ls(identifier)[0]
+                    self.assertTrue(cmds.objExists(group + "." + attribute))
+                    self.assertEqual(cmds.getAttr(group + ".FaceCamMode"), 1)
+                else:
+                    aim_offset = cmds.getAttr(new_cam + ".cams_aim_offset")
+                    self.assertTrue(cmds.objExists(aim_offset))
+                cmds.undo()
+                self.assertEqual(len(cmds.ls(type="camera")), len(original))
+
+    def test_follow_and_aim_camera_failure_undoes_partial_scene(self):
+        for creator in (followCam.followCam, aimCam.aimCam):
+            with self.subTest(creator=creator.__name__):
+                cmds.file(new=True, force=True)
+                locator = cmds.spaceLocator(name="failure_target")[0]
+                cmds.select(locator, replace=True)
+                original_cameras = set(cmds.ls(type="camera"))
+                with mock.patch.object(cmds, "lookThru", side_effect=lambda *a, **kw:
+                                       "persp" if kw.get("q") else None), \
+                     mock.patch.object(cmds, "pointConstraint",
+                                       side_effect=RuntimeError("synthetic constraint failure")):
+                    with self.assertRaisesRegex(RuntimeError, "synthetic constraint failure"):
+                        creator()
+                self.assertEqual(set(cmds.ls(type="camera")), original_cameras)
+                self.assertEqual(cmds.ls(selection=True), [locator])
+
     def test_hud_menu_rebuild_keeps_main_hud_action_valid(self):
         parent = QtWidgets.QWidget()
         main_menu = widgets.QFlatOpenMenu("Tools", parent)

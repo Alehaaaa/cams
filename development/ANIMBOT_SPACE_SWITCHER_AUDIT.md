@@ -45,6 +45,7 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
 | Layered rotation curves | No `animLayer` symbol appears in the searched names/constants of the main switch handler or `core313.pyc`; indirect wrappers and obfuscated names remain possible | Maya 2024's selected layer receives compensation keys while base keys stay unchanged. Camstool's Euler filtering now traverses `animBlendNode*` upstream to reach both base and layered rotation curves; tested through the real Maya DG and widget. This is Maya-derived behavior, not attributed to animBot. |
 | Impossible pose and interrupted operation | The reference uses temporary transforms and multiple write/cleanup stages; full exception edges remain obfuscated | Camstool verifies the evaluated matrix after writing, raises `PoseCompensationError` if exact matching is impossible, and rolls the undo chunk back; tests cover fully locked translation, selected-range undo/redo, and cancellation after partial writes |
 | UI lifecycle | UI bytecode contains Qt layouts, click callbacks, tooltips, hide/deleteLater | Popup, multi-switch dialog, target setup, callback removal and refresh batching in `SpaceSwitchAlehaWidget` |
+| Adaptive spline correction (Camstool extension) | No equivalent adaptive curve-refinement algorithm has been recovered from `attributeSpaceSwitcher313.pyc` or `core313.pyc`; their observed temporary-transform/constraint and explicit-key paths are described above | After eighth-frame baking, Camstool captures midpoints before mutation, evaluates resulting world matrices and keys only points exceeding 0.001-unit matrix-element deviation. It retries at most twice, caps probes at 520, and raises a rollback-triggering error if sampled deviation persists. Maya regression verifies flat/linear tangents and undo. |
 
 ## Verified and unresolved boundaries
 
@@ -82,16 +83,21 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
   external authored-key boundaries and restores the previous switch state at
   the range exit. The tests check quarter and eighth frames from 1 to 10, rather
   than only original key frames. This is Camstool's tested algorithm, not a
-  recovered animBot algorithm. Exact world-space motion between its sample
+  recovered animBot algorithm. The midpoint refinement adds correction keys
+  selectively after measuring the changed Maya curves, within a bounded
+  evaluation budget. Exact world-space motion between *all* verification
   points, original curve topology/tangents, and nontrivial evaluation cycles
-  are not mathematically guaranteed; densely baked curves can be expensive.
+  are not mathematically guaranteed; long-range coarsening and dense curves
+  remain performance/accuracy trade-offs. Maya's key-time normalization is
+  handled by rounding midpoint keys to six decimal places before validation.
 
 ## Verification scope (Maya 2024)
 
-The expanded `tests/test_spaceswitch_maya.py` suite exercises 36 independent
+The expanded `tests/test_spaceswitch_maya.py` suite exercises 37 independent
 scenarios, including real intermediate trajectory samples, a selected range
 with unchanged world samples outside its boundary, active animation-layer
-translation with original base keys retained, and native Qt mouse interaction.
+translation with original base keys retained, mixed flat/linear tangents and
+undo after adaptive compensation, and native Qt mouse interaction.
 The reference branch above also
 includes cleanup on cancellation at offsets 1966–2174, but its exact
 exception-safety guarantees remain obscured by called wrappers; Camstool's

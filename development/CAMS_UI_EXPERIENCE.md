@@ -7,6 +7,8 @@ existing QAction and therefore runs the same lifecycle, shortcuts, callbacks,
 and Maya operations as the Tools or General menus. The hub tracks changes to
 enabled/visible action state; it is a launcher, not a second implementation of
 the tools.
+The main camera strip also exposes a compact Cams Tools button beside the
+scrollable camera list. The existing General menu action remains available.
 
 | Area | Primary workflow | Supporting UI |
 | --- | --- | --- |
@@ -41,6 +43,17 @@ action used by another.
   covered by Maya scene tests.
 - Existing `.aleha` preference representations are read with literal parsing
   instead of executing preference text.
+- Follow Cam and Aim Cam now share guarded camera creation, metadata setup,
+  container configuration and undo recovery. The Aim Cam creator adds missing
+  `cams_type` and offset metadata on a standard Maya camera; the old path
+  raised `setAttr: No object matches name` halfway through creation. Follow
+  Cam locks explicitly named group channels, rather than relying on Maya's
+  implicit current selection. Both restore the prior selection on failure.
+- Camera shelf context actions compare full DAG paths for nested/namespaced
+  camera selection. Ephemeral context menu QActionGroups are owned by their
+  menu rather than accumulating on the long-lived camera button.
+- The Tool Hub refreshes action validity even when its window remains visible
+  across repeated openings; this covers another deleted-QAction edge case.
 
 ## Tested and remaining scope
 
@@ -48,7 +61,9 @@ action used by another.
 launcher dispatch and action state, real camera attribute bindings, numeric
 validation and color picker/brightness persistence. New coverage checks HUD
 reopen/preset isolation, deleted menu actions, two-camera rig switching and
-focal lengths, undo and failure rollback. The 36 Space Switcher
+focal lengths, Follow/Aim creation from real Maya scene selection, metadata,
+single-step undo and constraint-failure rollback, nested camera context
+selection and reopening the Tool Hub with a destroyed QAction. The 37 Space Switcher
 Maya tests include standalone Qt interactions, animated rig compensation and
 transactional undo. These validate component integration in Maya standalone.
 An end-to-end graphical Maya session, dock/undock geometry across OS-specific

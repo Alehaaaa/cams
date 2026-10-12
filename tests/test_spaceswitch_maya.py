@@ -117,6 +117,34 @@ class SpaceSwitchTests(unittest.TestCase):
                     for t in samples)
         self.assertLess(error, 0.001, "Unexpected subframe world trajectory error: %g" % error)
 
+    def test_adaptive_compensation_with_flat_and_linear_tangents_and_undo(self):
+        offset = cmds.createNode("transform", name="weighted_offset")
+        control = self._enum_control("weighted_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="weighted_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 9)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control + ".translateX", time=1, value=3)
+        cmds.setKeyframe(control + ".translateX", time=10, value=13)
+        cmds.keyTangent(control + ".translateX", edit=True, time=(1, 1),
+                        inTangentType="flat", outTangentType="flat")
+        cmds.keyTangent(control + ".translateX", edit=True, time=(10, 10),
+                        inTangentType="linear", outTangentType="linear")
+        sample_times = [1 + index / 16.0 for index in range(145)]
+        expected = {time: cmds.getAttr(control + ".worldMatrix[0]", time=time)[12]
+                    for time in sample_times}
+        cmds.currentTime(5)
+        with spaceswitch.UndoChunk("AdaptiveTangents"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        self.assertLess(max(abs(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - expected[t])
+                            for t in sample_times), 0.002)
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
+
     def test_timeline_range_preserves_motion_outside_selected_interval(self):
         offset = cmds.createNode("transform", name="range_motion_offset")
         control = self._enum_control("range_motion_ctrl", "World:Offset")

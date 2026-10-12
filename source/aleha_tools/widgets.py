@@ -368,9 +368,13 @@ class QToolHubDialog(QFlatDialog):
             button.setIcon(action.icon())
 
     def showEvent(self, event):
+        self.refresh_actions()
+        super().showEvent(event)
+
+    def refresh_actions(self):
+        """Also called when opening an already visible Tool Hub window."""
         for key in self._tool_actions:
             self._sync_tool_action(key)
-        super().showEvent(event)
 
 
 # QLineEdit that doesn't trigger next action
@@ -642,7 +646,11 @@ class QFlatCamButton(QPushButton):
             self.icons["deselect"], "Deselect", partial(deselect_cam, self._camera, self), description="Remove the camera from the selection."
         )
 
-        is_selected = self._camera in (cmds.ls(selection=True) or [])
+        # Maya may return short or full DAG names depending on the current
+        # selection. Compare resolved paths so namespaced/nested cameras stay
+        # synchronized with the scene's actual selection.
+        camera_paths = set(cmds.ls(self._camera, long=True) or [])
+        is_selected = bool(camera_paths.intersection(cmds.ls(selection=True, long=True) or []))
         self.select_action.setVisible(not is_selected)
         self.deselect_action.setVisible(is_selected)
 
@@ -665,7 +673,7 @@ class QFlatCamButton(QPushButton):
         if self._camera == self._parentUI.default_cam[0]:
             default_cam_menu = QFlatOpenMenu("Default camera")
             default_cam_menu.setIcon(self.icons["default"])
-            default_cam_menu_grp = QActionGroup(self)
+            default_cam_menu_grp = QActionGroup(default_cam_menu)
 
             for c in get_cameras(default=True):
                 description = "Set %s as the default camera." % c
@@ -1030,7 +1038,7 @@ class QFlatCamButton(QPushButton):
 
                 modes = [("Position, Rotation", True), ("Only Position", False)]
 
-                group = QActionGroup(self)
+                group = QActionGroup(follow_mode_menu)
                 for label, mode in modes:
                     action = follow_mode_menu.addAction(
                         label, description="Set whether the camera follows both Position and Rotation, or just Position."
