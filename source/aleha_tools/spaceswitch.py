@@ -3131,6 +3131,10 @@ class OperationCancelled(Exception):
         self.wrote = wrote
 
 
+class PoseCompensationError(RuntimeError):
+    """The requested space cannot preserve a target's evaluated world pose."""
+
+
 class _MainThreadMarshal(QtCore.QObject):
     """Run a callable on Maya's main thread and block the calling worker.
 
@@ -3547,7 +3551,12 @@ class SwitchExecutor(object):
     # --- writing (main thread, one call per step) ------------------------------
     @staticmethod
     def _capture(frame, targets):
-        return {target: cmds.getAttr("%s.worldMatrix[0]" % target, time=frame)
+        # World-matrix getAttr(time=...) can evaluate against a different DG
+        # context from xform at the *current* frame after repeated key edits.
+        # Evaluate the whole scene at the sample, as the reference's temporary
+        # duplicate/constraint workflow does, then read the actual DAG matrix.
+        cmds.currentTime(frame, update=True)
+        return {target: cmds.xform(target, query=True, worldSpace=True, matrix=True)
                 for target in targets}
 
     def _begin_write(self, schedule, targets):
@@ -3638,13 +3647,25 @@ class SwitchExecutor(object):
         for target in sorted(targets, key=lambda t: ctx["depth"].get(t, 0)):
             settable, animated = ctx["channels"][target]
             before = self._channel_values(target)
+            pose_error = None
             try:
                 Maya.set_matrix(target, snapshot[target])
             except RuntimeError as exc:
-                if target not in ctx["warned"]:
-                    ctx["warned"].add(target)
-                    self.issues.append("%s: could not match pose (%s)" % (target, exc))
-                continue
+                pose_error = exc
+            try:
+                result_matrix = Maya.matrix(target)
+            except RuntimeError as exc:
+                pose_error = exc
+                result_matrix = None
+            if result_matrix is None or any(
+                abs(actual - desired) > self.EPSILON
+                for actual, desired in zip(result_matrix, snapshot[target])
+            ):
+                raise PoseCompensationError(
+                    "%s at frame %s could not preserve its world transform%s"
+                    % (target, frame, ": %s" % pose_error if pose_error else
+                       " (locked, connected or constrained channels)")
+                )
             after = self._channel_values(target)
             may_key = targets[target] or ctx["auto_key"]
             # Animated channels always get a key (pose locked at the switch);
@@ -3702,10 +3723,14 @@ class SwitchExecutor(object):
 
             snapshots = {}
             run.status = "SpaceSwitch: saving positions"
-            for frame in sorted(schedule):
-                run.check(wrote=False)
-                snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
-                run.step()
+            initial_time = run.main(cmds.currentTime, query=True)
+            try:
+                for frame in sorted(schedule):
+                    run.check(wrote=False)
+                    snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
+                    run.step()
+            finally:
+                run.main(cmds.currentTime, initial_time, update=True)
 
             run.check(wrote=False)
             ctx = run.main(self._begin_write, schedule, targets)
@@ -4725,7 +4750,28 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                 return False
         return True
 
+    @staticmethod
+    def _timeline_scope():
+        """Selected time range, or the current frame outside graphical Maya."""
+        now = cmds.currentTime(query=True)
+        try:
+            timeline = mel.eval('global string $gPlayBackSlider; $tmp=$gPlayBackSlider;')
+            if timeline:
+                selected = cmds.timeControl(timeline, q=True, rangeVisible=True)
+                times = cmds.timeControl(timeline, q=True, rangeArray=True)
+                if times and len(times) == 2:
+                    return bool(selected), times
+        except (RuntimeError, ValueError):
+            pass
+        return False, [now, now]
+
     def _apply_requests(self, requests):
+        # The cooperative event loop can receive another scripted request
+        # while an earlier one is still writing. Never nest undo chunks or
+        # start a second compensation against a half-switched scene.
+        if self._busy:
+            cmds.warning("SpaceSwitch: a switch is already in progress")
+            return
         if not self._missing_target_prompt(requests):
             return
         prepared = []
@@ -4738,9 +4784,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                 targets.update(op.xform_target for op in operations)
         if not prepared:
             return
-        timeline = mel.eval('$tmp = $gPlayBackSlider')
-        selected = cmds.timeControl(timeline, q=True, rangeVisible=True)
-        frame_range = cmds.timeControl(timeline, q=True, rangeArray=True)
+        selected, frame_range = self._timeline_scope()
         self._close_active_popup()
         self._remove_callbacks()
         self._refresh_timer.stop()
@@ -4757,6 +4801,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                         self.apply_euler_filter(changed, self.executor.last_range)
         except OperationCancelled as exc:
             cancelled = exc
+        except PoseCompensationError as exc:
+            failed = exc  # expected rig limitation; rollback and show a concise warning
         except Exception as exc:
             failed = exc
             traceback.print_exc()

@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "source")))
@@ -21,6 +22,10 @@ from aleha_tools import spaceswitch
 
 class _Owner(object):
     fast_rotation_order = False
+
+
+class _FastOwner(object):
+    fast_rotation_order = True
 
 
 class SpaceSwitchTests(unittest.TestCase):
@@ -194,6 +199,226 @@ class SpaceSwitchTests(unittest.TestCase):
         for target in targets:
             after = cmds.xform(target, q=True, ws=True, matrix=True)
             self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(before[target], after)))
+
+    def test_locked_unaffected_channel_does_not_prevent_pose_compensation(self):
+        offset = cmds.createNode("transform", name="locked_offset")
+        control = cmds.createNode("transform", name="locked_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="locked_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 9)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setAttr(control + ".translateX", 2)
+        cmds.setAttr(control + ".rotateY", lock=True)
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+
+        operation = spaceswitch.SwitchOperation(control, control, "space", 1)
+        with spaceswitch.UndoChunk("LockedChannelSpaceSwitch"):
+            executor = spaceswitch.SwitchExecutor(_Owner())
+            executor.apply_requests([([operation], False)], False, [1, 1])
+
+        after = cmds.xform(control, q=True, ws=True, matrix=True)
+        self.assertEqual(cmds.getAttr(control + ".space"), 1)
+        self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(before, after)),
+                        "An unrelated locked rotation must not block translation compensation")
+        self.assertFalse(cmds.ls("camstool_spaceTemp_*", type="transform"))
+
+    def test_impossible_locked_pose_fails_instead_of_silently_popping(self):
+        offset = cmds.createNode("transform", name="impossible_offset")
+        control = cmds.createNode("transform", name="impossible_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="impossible_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 9)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        for channel in ("translateX", "translateY", "translateZ"):
+            cmds.setAttr(control + "." + channel, lock=True)
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+        operation = spaceswitch.SwitchOperation(control, control, "space", 1)
+
+        with self.assertRaises(spaceswitch.PoseCompensationError):
+            with spaceswitch.UndoChunk("ImpossiblePoseSwitch"):
+                spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                    [([operation], False)], False, [1, 1])
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space"), 0)
+        self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(
+            before, cmds.xform(control, q=True, ws=True, matrix=True))))
+
+    def test_ui_rolls_back_failed_switch_and_restores_state(self):
+        offset = cmds.createNode("transform", name="rollback_offset")
+        control = cmds.createNode("transform", name="rollback_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="rollback_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 9)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setAttr(control + ".translateX", lock=True)
+        cmds.setAttr(control + ".translateY", lock=True)
+        cmds.setAttr(control + ".translateZ", lock=True)
+        cmds.select(control)
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        widget.euler_filter = False
+        options = widget._build_options_map(widget._build_switch_data()["space"]["objects"])
+        initial_time = cmds.currentTime(q=True)
+        initial_auto_key = cmds.autoKeyframe(q=True, state=True)
+
+        widget._apply_requests([("Offset", "space", options, False)])
+
+        self.assertEqual(cmds.getAttr(control + ".space"), 0)
+        self.assertEqual(cmds.currentTime(q=True), initial_time)
+        self.assertEqual(cmds.autoKeyframe(q=True, state=True), initial_auto_key)
+        self.assertFalse(widget._busy)
+        self.assertFalse(cmds.ls("camstool_spaceTemp_*"))
+        widget.close()
+        parent.close()
+
+    def test_selected_timeline_range_preserves_outside_keys_and_undo_redo(self):
+        offset = cmds.createNode("transform", name="range_offset")
+        control = cmds.createNode("transform", name="range_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="range_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 8)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        for frame, value in ((1, 1), (5, 4), (10, 10)):
+            cmds.setKeyframe(control, attribute="translateX", time=frame, value=value)
+        before = {frame: cmds.getAttr(control + ".worldMatrix[0]", time=frame)
+                  for frame in (1, 5, 10)}
+        operation = spaceswitch.SwitchOperation(control, control, "space", 1)
+
+        with spaceswitch.UndoChunk("RangeSpaceSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([operation], False)], True, [4, 8])
+
+        self.assertEqual([cmds.getAttr(control + ".space", time=t) for t in (1, 5, 10)],
+                         [0, 1, 0])
+        for frame in before:
+            self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(
+                before[frame], cmds.getAttr(control + ".worldMatrix[0]", time=frame))))
+        cmds.undo()
+        self.assertEqual([cmds.getAttr(control + ".space", time=t) for t in (1, 5, 10)],
+                         [0, 0, 0])
+        cmds.redo()
+        self.assertEqual([cmds.getAttr(control + ".space", time=t) for t in (1, 5, 10)],
+                         [0, 1, 0])
+
+    def test_cancel_after_partial_write_rolls_back_all_frames(self):
+        offset = cmds.createNode("transform", name="cancel_offset")
+        control = cmds.createNode("transform", name="cancel_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="cancel_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 8)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        for frame, value in ((1, 1), (5, 4), (10, 10)):
+            cmds.setKeyframe(control, attribute="translateX", time=frame, value=value)
+        cmds.select(control)
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        widget.euler_filter = False
+        options = widget._build_options_map(widget._build_switch_data()["space"]["objects"])
+
+        class CancelAfterFirstCompensation(spaceswitch.OperationRunner):
+            def step(self, status=None):
+                result = super(CancelAfterFirstCompensation, self).step(status)
+                if self.done >= 5:  # 3 captures, 1 switch write, 1 matched frame
+                    self.cancel()
+                return result
+
+        with mock.patch.object(spaceswitch, "OperationRunner", CancelAfterFirstCompensation):
+            widget._apply_requests([("Offset", "space", options, True)])
+
+        self.assertEqual([cmds.getAttr(control + ".space", time=t) for t in (1, 5, 10)],
+                         [0, 0, 0])
+        self.assertEqual(cmds.keyframe(control + ".space", q=True, keyframeCount=True), 0)
+        self.assertFalse(widget._busy)
+        widget.close()
+        parent.close()
+
+    def test_reentrant_ui_request_is_ignored_during_active_switch(self):
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        widget._busy = True
+        with mock.patch.object(widget, "_missing_target_prompt") as prompt:
+            widget._apply_requests([])
+        prompt.assert_not_called()
+        self.assertTrue(widget._busy)
+        widget._busy = False
+        widget.close()
+        parent.close()
+
+    def test_close_removes_maya_callbacks_and_pending_refresh(self):
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        self.assertTrue(widget._cb.ids)
+        widget._refresh_timer.start()
+        widget._popup_timer.start()
+        widget.close()
+        self.assertFalse(widget._cb.ids)
+        self.assertFalse(widget._refresh_timer.isActive())
+        self.assertFalse(widget._popup_timer.isActive())
+        parent.close()
+
+    def test_rotation_order_on_oriented_joint_keeps_world_rotation(self):
+        cmds.select(clear=True)
+        joint = cmds.joint(name="oriented_joint")
+        cmds.setAttr(joint + ".jointOrientY", 30)
+        cmds.setKeyframe(joint, attribute="rotateX", time=1, value=20)
+        cmds.setKeyframe(joint, attribute="rotateY", time=8, value=55)
+        before = {frame: cmds.getAttr(joint + ".worldMatrix[0]", time=frame)
+                  for frame in (1, 8)}
+        operation = spaceswitch.SwitchOperation(joint, joint, "rotateOrder", 5)
+
+        with spaceswitch.UndoChunk("JointRotationOrder"):
+            spaceswitch.SwitchExecutor(_FastOwner()).apply_requests(
+                [([operation], True)], False, [1, 8])
+
+        self.assertEqual(cmds.getAttr(joint + ".rotateOrder"), 5)
+        for frame, matrix in before.items():
+            after = cmds.getAttr(joint + ".worldMatrix[0]", time=frame)
+            self.assertTrue(all(abs(a - b) < 1e-4 for a, b in zip(matrix, after)),
+                            "Joint pose changed at frame %s" % frame)
+
+    def test_repeated_switches_and_noop_keep_pose_and_key_count(self):
+        offset = cmds.createNode("transform", name="repeat_offset")
+        control = cmds.createNode("transform", name="repeat_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=True)
+        condition = cmds.createNode("condition", name="repeat_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 6)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=2)
+        cmds.setKeyframe(control, attribute="translateX", time=8, value=9)
+        cmds.currentTime(5)
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+        executor = spaceswitch.SwitchExecutor(_Owner())
+
+        for value in (1, 1, 0, 1):
+            op = spaceswitch.SwitchOperation(control, control, "space", value)
+            captured = cmds.getAttr(control + ".worldMatrix[0]", time=5)
+            with spaceswitch.UndoChunk("RepeatedSpaceSwitch"):
+                executor.apply_requests([([op], False)], False, [5, 5])
+            after = cmds.xform(control, q=True, ws=True, matrix=True)
+            self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(before, after)),
+                            "Repeated switch to %s: %r -> %r; sampled=%r, tx=%s" %
+                            (value, before, after, captured,
+                             cmds.getAttr(control + ".translateX")))
+            self.assertEqual(cmds.getAttr(control + ".space"), value)
+            self.assertEqual(cmds.keyframe(control + ".space", q=True, keyframeCount=True), 3)
 
     def test_numeric_space_switch_is_discrete_until_keyed_frame(self):
         node = cmds.createNode("transform", name="numeric_space_ctrl")
