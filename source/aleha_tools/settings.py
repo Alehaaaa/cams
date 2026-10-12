@@ -1,6 +1,5 @@
-import maya.cmds as cmds
 import os
-import shutil
+import ast
 
 # from .util import *
 
@@ -57,25 +56,8 @@ def get_prefs_path(settings=True):
     if settings:
         settings = list(initial_settings().keys())
 
-    # Move old preferences # Just remove them for now...
-    old_prefs_dir = os.path.join(os.environ["MAYA_APP_DIR"], cmds.about(v=True), "prefs", "aleha_tools")
-    if os.path.exists(old_prefs_dir):
-        shutil.rmtree(old_prefs_dir)
-
-    """prefs_path = os.path.join(prefs_dir, "defaultCameraSettings.aleha")
-    old_prefs = os.path.join(old_prefs_dir, "camsPrefs.aleha")
-    if os.path.exists(old_prefs):
-        confirm = cmds.confirmDialog(
-            title="Old preferences for Cams found",
-            message="An old preferences file has been found.\nDo you want to copy them?",
-            button=["Yes", "Delete"],
-            defaultButton="Yes",
-        )
-        if confirm == "Yes":
-            shmove(old_prefs, prefs_path)
-            shrmtree(old_prefs_dir)
-        elif confirm == "Delete":
-            shrmtree(old_prefs_dir)"""
+    # Old Maya preferences are deliberately preserved. Reading new preferences
+    # must have no destructive side effects.
 
     return prefs_dir, settings
 
@@ -91,7 +73,7 @@ def get_all_prefs():
         if os.path.exists(setting_path):
             try:
                 with open(setting_path, "r") as setting_file:
-                    all_prefs[setting] = eval(setting_file.read())
+                    all_prefs[setting] = ast.literal_eval(setting_file.read())
             except Exception:
                 all_prefs[setting] = initial[setting]
                 save_to_disk(setting, initial[setting])
@@ -109,7 +91,7 @@ def get_pref(setting):
 
     if os.path.exists(setting_path):
         with open(setting_path, "r") as setting_file:
-            return eval(setting_file.read())
+            return ast.literal_eval(setting_file.read())
     else:
         return None
 

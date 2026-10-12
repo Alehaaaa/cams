@@ -544,23 +544,15 @@ def run_tools(tool, ui=None):
     if get_python_version() > 2:
         try:
             import importlib
-            from . import base_widgets, widgets, util
-
-            importlib.reload(base_widgets)
-            importlib.reload(widgets)
-            importlib.reload(util)
-
             tool_module = importlib.import_module("aleha_tools._tools." + tool)
-            importlib.reload(tool_module)
         except ImportError:
             cmds.error("Error importing module " + tool)
             return
 
-        if ui:
-            tool_instance = getattr(tool_module, tool)()
-            tool_instance.showUI(ui)
-        else:
-            getattr(tool_module, tool)()
+        tool_class = getattr(tool_module, tool)
+        if hasattr(tool_class, "showUI"):
+            return tool_class.showUI(ui)
+        return tool_class()
 
     else:
         cmds.warning("Work in Progress")

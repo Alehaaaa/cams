@@ -1,5 +1,6 @@
 """Real Maya 2024/Qt regression checks for the shared Cams interface."""
 import os
+import copy
 import sys
 import unittest
 from unittest import mock
@@ -8,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "source")))
 
 from PySide2 import QtWidgets, QtGui
+import shiboken2
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
@@ -15,7 +17,9 @@ import maya.standalone
 maya.standalone.initialize()
 from maya import cmds
 
-from aleha_tools import widgets, base_widgets
+from aleha_tools import widgets, base_widgets, cams
+from aleha_tools._tools import HUDWindow
+from aleha_tools._tools import multicams
 
 
 class PreferencesOwner(QtWidgets.QWidget):
@@ -35,6 +39,101 @@ class PreferencesOwner(QtWidgets.QWidget):
 
 
 class CamsUITests(unittest.TestCase):
+    def test_hud_menu_rebuild_keeps_main_hud_action_valid(self):
+        parent = QtWidgets.QWidget()
+        main_menu = widgets.QFlatOpenMenu("Tools", parent)
+        holder = type("HUDMenuHolder", (), {
+            "add_presets": cams.QCamsWindow.add_presets,
+            "hud_preset_triggered": lambda self, *args: None,
+        })()
+        holder.menu_presets = widgets.QFlatOpenMenu("HUD Presets", main_menu)
+        holder.hud_editor_action = main_menu.addAction("HUD Editor")
+        with mock.patch.object(cams.settings, "get_pref", return_value={
+                "presets": {"Default": {"bmc": 6}}, "selected": 0}):
+            holder.add_presets()
+            holder.add_presets()
+            holder.add_presets()
+        self.assertTrue(shiboken2.isValid(holder.hud_editor_action))
+        self.assertEqual(sum(action.text() == "HUD Editor" for action in main_menu.actions()), 1)
+        self.assertEqual(sum(action.text() == "HUD Editor" for action in holder.menu_presets.actions()), 1)
+        parent.close()
+
+    def test_multicams_qt_workflow_drives_both_sources_and_is_undoable(self):
+        cmds.file(new=True, force=True)
+        first, shape_a = cmds.camera(name="shot_alpha")
+        second, shape_b = cmds.camera(name="shot_beta")
+        cmds.setAttr(shape_a + ".focalLength", 30)
+        cmds.setAttr(shape_b + ".focalLength", 75)
+        cmds.setAttr(first + ".translateX", 3)
+        cmds.setAttr(second + ".translateX", 12)
+        cmds.select(first, second, replace=True)
+        parent = QtWidgets.QWidget()
+        dialog = multicams.multicams.showUI(parent)
+        self.assertEqual(len(dialog.selected_cameras), 2)
+        dialog.cameras.setCurrentRow(1)
+        dialog.remove_selected()
+        self.assertEqual(len(dialog.selected_cameras), 1)
+        cmds.select(second, replace=True)
+        dialog.get_cameras()
+        self.assertEqual(len(dialog.selected_cameras), 2)
+        dialog.camera_name.setText("edit_shot")
+        created = dialog.create_multi()
+        self.assertTrue(created)
+        cmds.undo()
+        self.assertFalse(cmds.objExists(created))
+        created = multicams.create_multicam_rig([first, second], "edit_shot")
+        new_shape = cmds.listRelatives(created, shapes=True, type="camera")[0]
+        for i, (position, focal) in enumerate(((3, 30), (12, 75))):
+            cmds.setAttr(created + ".selectedCamera", i)
+            self.assertAlmostEqual(cmds.xform(created, q=True, ws=True, t=True)[0], position, places=3)
+            self.assertAlmostEqual(cmds.getAttr(new_shape + ".focalLength"), focal, places=3)
+        dialog.close()
+        parent.close()
+
+    def test_multicams_failed_constraint_curve_write_rolls_back_entire_rig(self):
+        cmds.file(new=True, force=True)
+        first, _ = cmds.camera(name="safe_cam_a")
+        second, _ = cmds.camera(name="safe_cam_b")
+        cmds.select(first, second, replace=True)
+        selected = cmds.ls(selection=True, long=True)
+        with mock.patch.object(multicams.cmds, "setDrivenKeyframe",
+                               side_effect=RuntimeError("synthetic curve failure")):
+            with self.assertRaisesRegex(RuntimeError, "synthetic curve failure"):
+                multicams.create_multicam_rig([first, second], "failed_rig")
+        self.assertFalse(cmds.objExists("failed_rig"))
+        self.assertFalse(cmds.objExists("failed_rig_MultiCams_GRP"))
+        self.assertEqual(cmds.ls(selection=True, long=True), selected)
+
+    def test_hud_editor_reopens_single_instance_and_isolates_preset_values(self):
+        parent = QtWidgets.QWidget()
+        defaults = {"presets": {"Default": {"bmc": 6, "trc": 0, "tlc": 0,
+                                             "tmc": 0, "brc": 0, "blc": 8}}, "selected": 0}
+        with mock.patch.object(HUDWindow.cams_settings, "get_pref", return_value=copy.deepcopy(defaults)), \
+             mock.patch.object(HUDWindow.cams_settings, "save_to_disk"):
+            dialog = HUDWindow.HUDWindow.showUI(parent)
+            self.assertIs(dialog, HUDWindow.HUDWindow.showUI(parent))
+            dialog.new_preset()
+            self.assertEqual(dialog.hud_presets["New Preset"]["bmc"], 6)
+            dialog.hud_presets["New Preset"]["bmc"] = 4
+            self.assertEqual(dialog.hud_presets["Default"]["bmc"], 6)
+            dialog.close()
+        parent.close()
+
+    def test_tool_hub_survives_deleted_qaction_after_menu_rebuild(self):
+        parent = QtWidgets.QWidget()
+        actions = {key: QtWidgets.QAction(key, parent) for key in
+                   ("followCam", "aimCam", "multicams", "spaceswitch",
+                    "hud_editor_action", "settings_btn", "reload_btn")}
+        shiboken2.delete(actions["hud_editor_action"])
+        dialog = widgets.QToolHubDialog(actions, parent)
+        self.assertFalse(dialog.tool_buttons["hud_editor_action"].isEnabled())
+        replacement = QtWidgets.QAction("HUD Editor", parent)
+        parent.hud_editor_action = replacement
+        dialog.show()
+        self.assertTrue(dialog.tool_buttons["hud_editor_action"].isEnabled())
+        dialog.close()
+        parent.close()
+
     def test_tool_hub_groups_tools_and_dispatches_existing_actions(self):
         parent = QtWidgets.QWidget()
         actions = {}

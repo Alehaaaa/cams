@@ -93,6 +93,30 @@ class SpaceSwitchTests(unittest.TestCase):
             self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
                 before[frame], cmds.getAttr(control + ".worldMatrix[0]", time=frame))))
 
+    def test_subframe_probe_detects_curve_shape_error_between_baked_keys(self):
+        offset = cmds.createNode("transform", name="subframe_offset")
+        control = self._enum_control("subframe_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="subframe_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 8)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=2)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=8)
+        cmds.keyTangent(control + ".translateX", edit=True, inTangentType="spline",
+                        outTangentType="spline")
+        samples = [1 + i * 0.125 for i in range(73)]
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t) for t in samples}
+        cmds.currentTime(5)
+        with spaceswitch.UndoChunk("SubframeSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        error = max(abs(before[t][12] - cmds.getAttr(control + ".worldMatrix[0]", time=t)[12])
+                    for t in samples)
+        self.assertLess(error, 0.001, "Unexpected subframe world trajectory error: %g" % error)
+
     def test_timeline_range_preserves_motion_outside_selected_interval(self):
         offset = cmds.createNode("transform", name="range_motion_offset")
         control = self._enum_control("range_motion_ctrl", "World:Offset")

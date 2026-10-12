@@ -58,6 +58,7 @@ except ImportError:
     pass
 
 from .. import util
+from .. import settings as cams_settings
 from ..widgets import QFlatDialog, QFlatConfirmDialog
 
 reload(util)
@@ -220,15 +221,13 @@ class HUDWindow(QFlatDialog):
 
     @classmethod
     def showUI(cls, parent):
-        if not cls.dlg_instance:
-            cls.dlg_instance = HUDWindow(parent)
+        if not cls.dlg_instance or not util.is_valid_widget(cls.dlg_instance):
+            cls.dlg_instance = cls(parent)
 
-        if cls.dlg_instance.isHidden():
-            cls.dlg_instance.show()
-
-        else:
-            cls.dlg_instance.raise_()
-            cls.dlg_instance.activateWindow()
+        cls.dlg_instance.show()
+        cls.dlg_instance.raise_()
+        cls.dlg_instance.activateWindow()
+        return cls.dlg_instance
 
     def __init__(self, parent=None):
         QFlatDialog.__init__(self, parent)
@@ -365,6 +364,7 @@ class HUDWindow(QFlatDialog):
             closeButton=True,
         )
 
+        self.displayed_preset = ""
         self.refresh_ui()
 
     def insert_items(self, combo, items):
@@ -393,21 +393,16 @@ class HUDWindow(QFlatDialog):
         return str(self.preset_title.text())
 
     def get_prefs(self):
-        self.prefs_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "_prefs",
-            "hudSettings.aleha",
-        )
-
-        with open(self.prefs_path, "r") as prefs_file:
-            self.user_prefs = eval(prefs_file.read())
-            self.hud_presets = self.user_prefs["presets"]
+        self.user_prefs = cams_settings.get_pref("hudSettings") or cams_settings.initial_settings()["hudSettings"]
+        self.hud_presets = self.user_prefs["presets"]
 
     def save_to_disk(self):
-        with open(self.prefs_path, "w") as prefs_file:
-            self.user_prefs["presets"] = self.hud_presets
-            self.user_prefs["selected"] = list(self.hud_presets.keys()).index(self.get_current_preset())
-            prefs_file.write(str(self.user_prefs))
+        self.user_prefs["presets"] = self.hud_presets
+        self.user_prefs["selected"] = list(self.hud_presets.keys()).index(self.get_current_preset())
+        cams_settings.save_to_disk("hudSettings", self.user_prefs)
+        owner = self.parentWidget()
+        if owner is not None and hasattr(owner, "add_presets"):
+            owner.add_presets()
 
     def save_prefs(self):
         current_preset = self.get_current_preset()
@@ -449,7 +444,7 @@ class HUDWindow(QFlatDialog):
             self.hud_presets[preset_name] = self.hud_presets[current_preset].copy()
         else:
             preset_name = get_new_name()
-            self.hud_presets[preset_name] = self.default_hud
+            self.hud_presets[preset_name] = self.default_hud.copy()
 
         self.add_menu_preset(preset_name, checked=True)
         self.refresh_ui(preset_name, change=True)
@@ -497,7 +492,7 @@ class HUDWindow(QFlatDialog):
         )
 
         if response == QFlatConfirmDialog.Yes:
-            self.hud_presets[current_preset] = self.default_hud
+            self.hud_presets[current_preset] = self.default_hud.copy()
             self.refresh_ui()
             self.save_prefs()
 

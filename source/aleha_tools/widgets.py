@@ -336,26 +336,40 @@ class QToolHubDialog(QFlatDialog):
             layout.addWidget(QFlatSectionHeader(title, self))
             for key, label, help_text, action in available:
                 button = QFlatButton(label, background="#424a52", parent=self)
-                button.setIcon(action.icon())
                 button.setToolTip(help_text)
-                button.setEnabled(action.isEnabled())
-                button.clicked.connect(lambda checked=False, target=action: target.trigger())
-                action.changed.connect(lambda target=action, control=button: self._sync_tool_action(target, control))
+                button.clicked.connect(lambda checked=False, name=key: self._trigger_tool_action(name))
                 layout.addWidget(button)
                 self.tool_buttons[key] = button
                 self._tool_actions[key] = action
+                if is_valid_widget(action):
+                    action.changed.connect(lambda name=key: self._sync_tool_action(name))
+                self._sync_tool_action(key)
         self.root_layout.addLayout(layout)
         self.setBottomBar(closeButton=True)
 
-    @staticmethod
-    def _sync_tool_action(action, button):
+    def _get_tool_action(self, key):
+        owner = self.parentWidget()
+        action = getattr(owner, key, None) if owner is not None else None
+        if not is_valid_widget(action):
+            action = self._tool_actions.get(key)
+        return action if is_valid_widget(action) else None
+
+    def _trigger_tool_action(self, key):
+        action = self._get_tool_action(key)
+        if action is not None and action.isEnabled() and action.isVisible():
+            action.trigger()
+
+    def _sync_tool_action(self, key):
         """Keep launchers consistent with the existing Maya menu actions."""
-        button.setEnabled(action.isEnabled() and action.isVisible())
-        button.setIcon(action.icon())
+        button = self.tool_buttons[key]
+        action = self._get_tool_action(key)
+        button.setEnabled(bool(action and action.isEnabled() and action.isVisible()))
+        if action is not None:
+            button.setIcon(action.icon())
 
     def showEvent(self, event):
-        for key, action in self._tool_actions.items():
-            self._sync_tool_action(action, self.tool_buttons[key])
+        for key in self._tool_actions:
+            self._sync_tool_action(key)
         super().showEvent(event)
 
 

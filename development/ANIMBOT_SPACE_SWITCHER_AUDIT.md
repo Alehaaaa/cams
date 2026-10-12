@@ -72,10 +72,15 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
   frame-5 switch with authored transform keys at frames 1 and 10: world pose
   at frame 4 could drift despite matching authored poses. Camstool now captures
   the pre-switch trajectory over the enclosing authored-key span and bakes
-  compensated T/R/S at quarter-frame intervals (coarsened for spans over 120
-  frames, with a warning). For selected ranges it also captures the nearest
+  compensated T/R/S at eighth-frame intervals for spans of at most 60 frames,
+  coarsening longer spans under a fixed sample budget (with a warning).
+  Additional samples at 0.001 frame on both sides of switch boundaries
+  constrain the local-channel discontinuity; without these, a Maya probe
+  showed a 3.5-unit discrepancy at intermediate times. Eighth-frame baking
+  also removed a residual 0.041666-unit deviation between quarter-frame keys
+  in the probe. For selected ranges it also captures the nearest
   external authored-key boundaries and restores the previous switch state at
-  the range exit. The test checks every quarter frame from 1 to 10, rather
+  the range exit. The tests check quarter and eighth frames from 1 to 10, rather
   than only original key frames. This is Camstool's tested algorithm, not a
   recovered animBot algorithm. Exact world-space motion between its sample
   points, original curve topology/tangents, and nontrivial evaluation cycles
@@ -83,7 +88,7 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
 
 ## Verification scope (Maya 2024)
 
-The expanded `tests/test_spaceswitch_maya.py` suite exercises 35 independent
+The expanded `tests/test_spaceswitch_maya.py` suite exercises 36 independent
 scenarios, including real intermediate trajectory samples, a selected range
 with unchanged world samples outside its boundary, active animation-layer
 translation with original base keys retained, and native Qt mouse interaction.

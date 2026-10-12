@@ -3626,17 +3626,26 @@ class SwitchExecutor(object):
             first = max(previous) if previous else low
             last = min(following) if following else high
         frames.update(t for t in key_times if first <= t <= last)
-        # Quarter-frame sampling also bounds spline/tangent deviations between
-        # integer frames; a fixed budget prevents long shots from stalling UI.
+        # Eighth-frame sampling bounds spline/tangent deviations on short
+        # spans; a fixed budget prevents long shots from stalling UI.
         span = max(0.0, last - first)
-        interval = max(0.25, math.ceil(span / 120.0) * 0.25)
-        if interval > 0.25:
+        interval = max(0.125, math.ceil(span / 60.0) * 0.125)
+        if interval > 0.125:
             self.issues.append("Trajectory sampled every %g frames over %s-%s"
                                % (interval, first, last))
         current = math.ceil(first / interval) * interval
         while current <= last:
             frames.add(float(current))
             current += interval
+        # A space key introduces a discontinuity in local T/R even though the
+        # desired world trajectory is continuous. A sample only at the key
+        # lets spline tangents spread that jump across the preceding quarter
+        # frame. Anchor both sides of every switch/guard closely, preserving
+        # the original smooth motion until just before the change.
+        for change in set(job["frames"]) | set(job["guards"]):
+            for nearby in (change - 0.001, change + 0.001):
+                if first <= nearby <= last:
+                    frames.add(round(nearby, 5))
         frames.update((float(first), float(last)))
         return frames
 

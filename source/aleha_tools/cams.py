@@ -1190,7 +1190,13 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         self.menu_presets.addSeparator()
 
-        self.menu_presets.addAction(self.hud_editor_action)
+        # A QAction must not be shared with a menu that is cleared and rebuilt:
+        # Qt may delete the C++ action on clear(), leaving the Tools/Hub Python
+        # reference dangling. Keep each menu's action owned by that menu.
+        preset_editor = self.menu_presets.addAction(
+            QIcon(util.return_icon_path("attributes")), "HUD Editor",
+            description="Edit the layout and contents of Maya viewport HUDs.")
+        preset_editor.triggered.connect(partial(funcs.run_tools, "HUDWindow", self))
 
     def hud_preset_triggered(self, hud_index, preset):
         self.hud_settings["selected"] = hud_index
