@@ -3614,8 +3614,10 @@ class SwitchExecutor(object):
         return values
 
     def _compensate_frame(self, frame, targets, snapshot, ctx):
-        # update=False: only the nodes we pull are evaluated, not the whole scene.
-        cmds.currentTime(frame, update=False)
+        # The space attribute was just keyed at this frame. A no-update time
+        # change leaves DG-driven offset groups with stale world matrices,
+        # so xform(ws=True) computes the compensation in the previous space.
+        cmds.currentTime(frame, update=True)
         for target in sorted(targets, key=lambda t: ctx["depth"].get(t, 0)):
             settable, animated = ctx["channels"][target]
             before = self._channel_values(target)
