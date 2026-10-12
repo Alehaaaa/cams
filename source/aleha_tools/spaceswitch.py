@@ -3067,7 +3067,12 @@ class Timeline(QWidget):
     @classmethod
     def get_timeline(cls):
         try:
-            timeline = mel.eval("$tmpVar=$gPlayBackSlider")
+            # In mayapy/standalone the UI global has never been declared.
+            # An explicit global declaration reads it quietly as an empty
+            # string while still finding the real slider in graphical Maya.
+            timeline = mel.eval("global string $gPlayBackSlider; $tmpVar=$gPlayBackSlider;")
+            if not timeline:
+                return None
             ptr = (
                 omui.MQtUtil.findControl(timeline)
                 or omui.MQtUtil.findLayout(timeline)
@@ -3591,12 +3596,24 @@ class SwitchExecutor(object):
         for job in jobs:
             operation = job["op"]
             if job["keyed"]:
+                changed_times = sorted(set(job["frames"]) | set(job["guards"]))
                 for frame in job["frames"]:
                     cmds.setKeyframe(operation.plug, time=(frame, frame), value=operation.value,
                                      outTangentType="step")
                 for frame, value in job["guards"].items():
                     cmds.setKeyframe(operation.plug, time=(frame, frame), value=value,
                                      outTangentType="step")
+                # Maya's default tangent on a pre-existing numeric key can be
+                # spline/auto. A stepped outgoing tangent on the NEW switch key
+                # alone would interpolate the preceding space into this one.
+                # Turn the segment before each written switch/guard into a hold.
+                keyed_times = sorted(Maya.key_times_for_plug(operation.plug))
+                for frame in changed_times:
+                    index = bisect.bisect_left(keyed_times, frame)
+                    if index:
+                        previous = keyed_times[index - 1]
+                        cmds.keyTangent(operation.plug, edit=True,
+                                        time=(previous, previous), outTangentType="step")
             else:
                 cmds.setAttr(operation.plug, operation.value)
         for prepared in fast:
@@ -4131,6 +4148,16 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
     def _set_custom_switch_keys(self, keys):
         self.settings.setValue("custom_switches", sorted(set(keys)))
 
+    def _hidden_switch_keys(self):
+        """Rig-relative attribute identities removed from the automatic panel."""
+        value = self.settings.value("hidden_switches", []) or []
+        if isinstance(value, str):
+            return {value}
+        return {str(item) for item in value}
+
+    def _set_hidden_switch_keys(self, keys):
+        self.settings.setValue("hidden_switches", sorted(set(keys)))
+
     def _setting_bool(self, key, default):
         value = self.settings.value(key, default)
 
@@ -4395,7 +4422,18 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         return catalog
 
     def _build_switch_data(self):
-        return self._apply_target_overrides(self._build_switch_data_raw())
+        catalog = self._apply_target_overrides(self._build_switch_data_raw())
+        hidden = self._hidden_switch_keys()
+        if not hidden:
+            return catalog
+        for key in list(catalog):
+            objects = catalog[key].get("objects", {})
+            for target, obj_data in list(objects.items()):
+                if self._override_key(obj_data) in hidden:
+                    del objects[target]
+            if not objects:
+                del catalog[key]
+        return catalog
 
     def _build_switch_data_raw(self):
         custom_keys = self._custom_switch_keys()
@@ -4443,6 +4481,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             return
         keys = self._custom_switch_keys()
         added = []
+        restored = []
+        hidden = self._hidden_switch_keys()
         for node in selection:
             for attr in attrs:
                 if not Maya.attr_exists(node, attr):
@@ -4453,13 +4493,17 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                                  "or a numeric attribute with min/max)." % (node, long_attr))
                     continue
                 key = "%s.%s" % (SwitchCatalogBuilder.short_relative(node), long_attr)
+                if key in hidden:
+                    hidden.remove(key)
+                    restored.append(key)
                 if key not in keys:
                     keys.append(key)
                     added.append(key)
-        if not added:
+        if not added and not restored:
             cmds.warning("SpaceSwitch: no new enum/numeric attributes to add.")
             return
         self._set_custom_switch_keys(keys)
+        self._set_hidden_switch_keys(hidden)
         self.refresh(force=True)
 
     def _remove_custom_switch(self, data):
@@ -4468,6 +4512,17 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             keys.discard("%s.%s" % (SwitchCatalogBuilder.short_relative(obj_data.get("attr_node")),
                                     obj_data.get("attr")))
         self._set_custom_switch_keys(keys)
+        self.refresh(force=True)
+
+    def _hide_switch(self, data):
+        hidden = self._hidden_switch_keys()
+        for obj_data in data.get("objects", {}).values():
+            hidden.add(self._override_key(obj_data))
+        self._set_hidden_switch_keys(hidden)
+        self.refresh(force=True)
+
+    def _restore_hidden_switches(self):
+        self._set_hidden_switch_keys([])
         self.refresh(force=True)
 
     def _reset_target_override(self, data):
@@ -4481,9 +4536,6 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         objects = list(data.get("objects", {}).values())
         is_custom = any(d.get("source") == "custom" for d in objects)
         has_override = any(d.get("override") for d in objects)
-        if not is_custom and not has_override:
-            self._show_change_target_dialog(sender, data)
-            return
         menu = widgets.QFlatMenu(self)
         menu.aboutToShow.connect(self._suspend_auto_close)
         menu.aboutToHide.connect(self._resume_auto_close)
@@ -4497,6 +4549,9 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         if is_custom:
             menu.addAction("Remove Switch", description="Remove this switch from the panel.") \
                 .triggered.connect(lambda *a: self._remove_custom_switch(data))
+        else:
+            menu.addAction("Remove Switch", description="Hide this switch from the panel; it can be restored later.") \
+                .triggered.connect(lambda *a: self._hide_switch(data))
         Qtx.exec_menu(menu, QCursor.pos())
 
     def _rebuild_active_widgets(self):
@@ -4932,6 +4987,12 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         asset_action.setCheckable(True)
         asset_action.setChecked(self.asset_view)
         asset_action.toggled.connect(lambda *a: self.toggle_asset_view())
+
+        if self._hidden_switch_keys():
+            self.context_menu.addAction(
+                "Restore Hidden Switches",
+                description="Show previously removed automatically detected switches.",
+            ).triggered.connect(lambda *a: self._restore_hidden_switches())
 
         rotate_action = self.context_menu.addAction(
             "Enable Rotate Order",

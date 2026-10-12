@@ -167,6 +167,60 @@ class SpaceSwitchTests(unittest.TestCase):
                             "World pose changed at frame %s: %r -> %r" %
                             (frame, before[frame], after))
 
+    def test_one_attribute_compensates_multiple_targets(self):
+        settings = self._enum_control("space_settings", "World:Moved")
+        condition = cmds.createNode("condition", name="multi_target_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 7)
+        cmds.connectAttr(settings + ".space", condition + ".firstTerm")
+        targets = []
+        for index in (1, 2):
+            offset = cmds.createNode("transform", name="offset_%s" % index)
+            target = cmds.createNode("transform", name="control_%s" % index, parent=offset)
+            cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+            cmds.setAttr(target + ".translateX", index * 3)
+            targets.append(target)
+        before = {target: cmds.xform(target, q=True, ws=True, matrix=True)
+                  for target in targets}
+        operations = [spaceswitch.SwitchOperation(target, settings, "space", 1)
+                      for target in targets]
+
+        with spaceswitch.UndoChunk("MultiTargetSpaceSwitch"):
+            changed = spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [(operations, False)], False, [1, 1])
+
+        self.assertEqual(changed, set(targets))
+        self.assertEqual(cmds.getAttr(settings + ".space"), 1)
+        for target in targets:
+            after = cmds.xform(target, q=True, ws=True, matrix=True)
+            self.assertTrue(all(abs(a - b) < 1e-5 for a, b in zip(before[target], after)))
+
+    def test_numeric_space_switch_is_discrete_until_keyed_frame(self):
+        node = cmds.createNode("transform", name="numeric_space_ctrl")
+        cmds.addAttr(node, longName="spaceBlend", attributeType="double",
+                     minValue=0, maxValue=1, keyable=True)
+        cmds.setKeyframe(node, attribute="spaceBlend", time=1, value=0)
+        cmds.setKeyframe(node, attribute="spaceBlend", time=10, value=0)
+        cmds.currentTime(5)
+        op = spaceswitch.SwitchOperation(node, node, "spaceBlend", 1)
+        with spaceswitch.UndoChunk("NumericSpaceSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([op], False)], False, [5, 5])
+        self.assertAlmostEqual(cmds.getAttr(node + ".spaceBlend", time=4), 0.0)
+        self.assertAlmostEqual(cmds.getAttr(node + ".spaceBlend", time=5), 1.0)
+        self.assertAlmostEqual(cmds.getAttr(node + ".spaceBlend", time=10), 0.0)
+
+    def test_conflicting_multi_target_choices_do_not_write_partial_keys(self):
+        node = self._enum_control("conflict_ctrl")
+        operations = [spaceswitch.SwitchOperation(node, node, "space", value)
+                      for value in (0, 3)]
+        executor = spaceswitch.SwitchExecutor(_Owner())
+        with self.assertRaises(ValueError):
+            executor.apply_requests([([operations[0]], False),
+                                     ([operations[1]], False)], False, [1, 1])
+        self.assertEqual(cmds.getAttr(node + ".space"), 0)
+        self.assertEqual(cmds.keyframe(node + ".space", query=True, keyframeCount=True), 0)
+
     def test_asset_view_and_add_switch_controls_exist(self):
         parent = QtWidgets.QWidget()
         widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
@@ -230,6 +284,29 @@ class SpaceSwitchTests(unittest.TestCase):
         self.assertEqual(customized["space"]["long"], "Hand Follow")
         widget.close()
         widget_parent.close()
+
+    def test_detected_switch_can_be_hidden_and_restored_across_views(self):
+        node = self._enum_control("hidden_ctrl")
+        cmds.createNode("nurbsCurve", name="hidden_ctrlShape", parent=node)
+        condition = cmds.createNode("condition", name="hidden_condition")
+        cmds.connectAttr(node + ".space", condition + ".firstTerm")
+        cmds.select(node, replace=True)
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+
+        data = widget._build_switch_data()
+        self.assertIn("space", data)
+        widget._hide_switch(data["space"])
+        self.assertNotIn("space", widget._build_switch_data())
+        self.assertIn("hidden_ctrl.space", widget._hidden_switch_keys())
+
+        widget.toggle_asset_view()
+        self.assertNotIn("space@hidden_ctrl", widget._build_switch_data())
+        widget._restore_hidden_switches()
+        self.assertTrue(any(item.get("objects") for item in widget._build_switch_data().values()))
+        self.assertFalse(widget._hidden_switch_keys())
+        widget.close()
+        parent.close()
 
     def test_gimbal_ranking_uses_average_and_worst_frame(self):
         node = cmds.createNode("transform", name="gimbal_ctrl")
