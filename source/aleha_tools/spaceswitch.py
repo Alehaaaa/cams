@@ -2,8 +2,13 @@ from __future__ import division
 # -*- coding: utf-8 -*-
 
 import ast
+import bisect
+import json
 import math
 import sys
+import threading
+import traceback
+from collections import OrderedDict
 
 from maya import cmds, mel
 from maya import OpenMaya as om
@@ -174,21 +179,30 @@ class Maya(object):
             return attr
 
     @staticmethod
-    def enum_labels(node, attr):
+    def enum_items(node, attr):
+        """[(label, value)] honouring explicit indices like "World=0:Chest=3"."""
         try:
             raw = cmds.attributeQuery(attr, node=node, listEnum=True) or []
-            if not raw:
-                return []
-
-            result = []
-            for value in raw[0].split(":"):
-                label = value.split("=", 1)[0].strip()
-                if any(c.isalnum() for c in label):
-                    result.append(label)
-
-            return result
         except Exception:
             return []
+        items = []
+        next_value = 0
+        for part in (raw[0].split(":") if raw else []):
+            label, sep, value = part.partition("=")
+            label = label.strip()
+            if sep:
+                try:
+                    next_value = int(value)
+                except ValueError:
+                    pass
+            if any(c.isalnum() for c in label):
+                items.append((label, next_value))
+            next_value += 1
+        return items
+
+    @staticmethod
+    def enum_labels(node, attr):
+        return [label for label, _value in Maya.enum_items(node, attr)]
 
     @staticmethod
     def get_float(node, attr, default=0.0):
@@ -287,27 +301,6 @@ class UndoChunk(object):
         return False
 
 
-class UndoDisabled(object):
-    def __init__(self):
-        self.previous_state = None
-
-    def __enter__(self):
-        try:
-            self.previous_state = cmds.undoInfo(q=True, state=True)
-            cmds.undoInfo(stateWithoutFlush=False)
-        except Exception:
-            self.previous_state = None
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.previous_state is not None:
-            try:
-                cmds.undoInfo(stateWithoutFlush=self.previous_state)
-            except Exception:
-                pass
-        return False
-
-
 class RefreshSuspended(object):
     def __enter__(self):
         try:
@@ -321,59 +314,6 @@ class RefreshSuspended(object):
             cmds.refresh(suspend=False)
         except Exception:
             pass
-        return False
-
-
-class ProgressBar(object):
-    def __init__(self, maximum, status="Working...", interruptable=True):
-        self.maximum = maximum
-        self.status = status
-        self.interruptable = interruptable
-        self.ctrl = None
-        self.active = False
-
-    def __enter__(self):
-        try:
-            if cmds.about(batch=True):
-                return self
-            self.ctrl = mel.eval("$tmp = $gMainProgressBar")
-            cmds.progressBar(
-                self.ctrl,
-                e=True,
-                bp=True,
-                max=max(1, int(self.maximum)),
-                ii=self.interruptable,
-                status=self.status,
-            )
-            self.active = True
-        except Exception:
-            self.active = False
-        return self
-
-    def step(self, status=None):
-        if not self.active:
-            return False
-
-        try:
-            if cmds.progressBar(self.ctrl, q=True, ic=True):
-                return True
-
-            kwargs = {"edit": True, "step": 1}
-            if status:
-                kwargs["status"] = status
-
-            cmds.progressBar(self.ctrl, **kwargs)
-        except Exception:
-            pass
-
-        return False
-
-    def __exit__(self, exc_type, exc, tb):
-        if self.active:
-            try:
-                cmds.progressBar(self.ctrl, e=True, ep=True)
-            except Exception:
-                pass
         return False
 
 
@@ -449,7 +389,7 @@ class GimbalAnalyzer(object):
             self.convert_order_string(order),
         )
 
-    def compute_all_percentages(self, obj, order_list):
+    def compute_all_scores(self, obj, order_list):
         key_times = set()
 
         for attr in ("rotateX", "rotateY", "rotateZ"):
@@ -462,38 +402,46 @@ class GimbalAnalyzer(object):
             key_times = {cmds.currentTime(query=True)}
 
         result = []
+        samples = [self.rotation_at_time(obj, time_value, order_list)
+                   for time_value in sorted(key_times)]
 
         for order_name in order_list:
             target_order = self.convert_order_string(order_name)
-            worst = 0
+            samples_for_order = []
 
-            for time_value in sorted(key_times):
-                rotation = self.rotation_at_time(obj, time_value, order_list)
+            for rotation in samples:
                 reordered = om.MEulerRotation(rotation.x, rotation.y, rotation.z, rotation.order)
                 reordered.reorderIt(target_order)
-                worst = max(worst, self.gimbal_percentage(reordered))
+                samples_for_order.append(self.gimbal_percentage(reordered))
 
-            result.append(worst)
+            maximum = max(samples_for_order) if samples_for_order else 0.0
+            average = (sum(samples_for_order) / float(len(samples_for_order))
+                       if samples_for_order else 0.0)
+            # animBot ranks an order by the midpoint of its animation-average
+            # and worst-frame gimbal ratios; the UI exposes both components.
+            result.append({
+                "average": average,
+                "maximum": maximum,
+                "percentage": (average + maximum) / 2.0,
+            })
 
         return result
 
     @staticmethod
-    def classify(percentages):
-        labels = [""] * len(percentages)
+    def classify(scores):
+        labels = [""] * len(scores)
 
-        if not percentages or len(set(percentages)) == 1:
+        if not scores:
             return labels
 
-        best = min(percentages)
+        best = min(scores)
 
-        for i, value in enumerate(percentages):
-            diff = value - best
-
-            if diff == 0:
+        for i, value in enumerate(scores):
+            if value == best:
                 labels[i] = "Best"
-            elif diff <= 2:
+            elif value < 30:
                 labels[i] = "Good"
-            elif diff <= 6:
+            elif value < 50:
                 labels[i] = "OK"
 
         return labels
@@ -505,7 +453,8 @@ class GimbalAnalyzer(object):
             return {}
 
         try:
-            percentages = self.compute_all_percentages(obj, order_list)
+            scores = self.compute_all_scores(obj, order_list)
+            percentages = [item["percentage"] for item in scores]
             labels = self.classify(percentages)
         except Exception:
             return {}
@@ -513,6 +462,8 @@ class GimbalAnalyzer(object):
         return {
             order: {
                 "percentage": percentages[i],
+                "average": scores[i]["average"],
+                "maximum": scores[i]["maximum"],
                 "label": labels[i],
             }
             for i, order in enumerate(order_list)
@@ -533,8 +484,9 @@ class SwitchOperation(object):
         return Maya.plug(self.attr_node, self.attr)
 
     def is_valid(self):
+        # xform_target None = "Could not find Xform Target": switch without holding a pose.
         return (
-            Maya.exists(self.xform_target)
+            (self.xform_target is None or Maya.exists(self.xform_target))
             and Maya.exists(self.attr_node)
             and cmds.objExists(self.plug)
         )
@@ -561,27 +513,39 @@ class SwitchEntry(object):
         gimbal=None,
         matched=None,
         match_roles=None,
+        missing_target=False,
+        enum_values=None,
     ):
         self.display_object = display_object
         self.attr_node = attr_node
         self.attr = attr
         self.values = values or []
-        self.current = float(current)
+        # Real enum values per option; the UI works in option positions.
+        self.enum_values = list(enum_values) if enum_values else None
+        self.current = self.position(float(current))
         self.attr_type = attr_type
         self.min_value = float(min_value)
         self.max_value = float(max_value)
-        self.xform_target = xform_target or display_object
+        self.missing_target = bool(missing_target)
+        self.xform_target = None if self.missing_target else (xform_target or display_object)
         self.source = source
-        self.marked = marked or [self.current]
+        self.marked = [self.position(v) for v in marked] if marked else [self.current]
         self.gimbal = gimbal or {}
         self.matched = matched or []
         self.match_roles = match_roles or []
 
+    def position(self, raw):
+        if not self.enum_values:
+            return raw
+        value = int(round(raw))
+        return float(self.enum_values.index(value)) if value in self.enum_values else raw
+
     def to_dict(self):
         return {
             "enum": self.values,
+            "enum_values": self.enum_values,
             "marked": self.marked,
-            "keyed_values": sorted(Maya.keyed_values(self.attr_node, self.attr)),
+            "keyed_values": sorted(self.position(v) for v in Maya.keyed_values(self.attr_node, self.attr)),
             "current": self.current,
             "attr": self.attr,
             "type": self.attr_type,
@@ -593,6 +557,7 @@ class SwitchEntry(object):
             "gimbal": self.gimbal,
             "matched": self.matched,
             "matchedRole": self.match_roles,
+            "missing_target": self.missing_target,
         }
 
 
@@ -602,6 +567,20 @@ class SwitchCatalogBuilder(object):
     def __init__(self, analyzer, show_rotate_order=True):
         self.analyzer = analyzer
         self.show_rotate_order = show_rotate_order
+        self._target_cache = {}
+
+    def clear_cache(self):
+        self._target_cache.clear()
+
+    def xform_targets_for(self, node, attr):
+        """Cached detect_xform_targets (it walks the DG; rigs rarely rewire)."""
+        key = (node, attr)
+        cached = self._target_cache.get(key)
+        if cached is not None and all(Maya.exists(t) for t in cached):
+            return list(cached)
+        result = self.detect_xform_targets(node, attr)
+        self._target_cache[key] = list(result)
+        return list(result)
 
     @staticmethod
     def add_entry(catalog, key, long_name, entry):
@@ -775,6 +754,69 @@ class SwitchCatalogBuilder(object):
             queue.extend((child, depth + 1) for child in children)
         return matches
 
+    MAX_AUTO_TARGETS = 4
+
+    @staticmethod
+    def has_settable_xform(node):
+        for channel in ("tx", "ty", "tz", "rx", "ry", "rz"):
+            try:
+                if cmds.getAttr("%s.%s" % (node, channel), settable=True):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    @staticmethod
+    def _short(node):
+        return (cmds.ls(node) or [node])[0]
+
+    @classmethod
+    def detect_xform_targets(cls, switch_node, attribute, max_nodes=256):
+        """Find the transform(s) to keep in place when this attribute switches.
+
+        animBot's rule of thumb: the xform target is usually the object that
+        owns the switch. Otherwise follow the switch downstream to the
+        transforms it drives (constraint weights, blend/choice nodes...):
+
+        * it drives the switch owner itself or one of its parents
+          (offset/space group above the control) -> the control itself;
+        * it drives groups above other controls -> the nearest curve
+          controls under them (several targets allowed, e.g. IK + pole).
+
+        Ambiguous results fall back to the owner when it can move; an owner
+        that can't move (locked settings node) returns [] -> "Could not find
+        Xform Target", and the user is asked to set it up.
+        """
+        plug = "{}.{}".format(switch_node, attribute)
+        queue = list(cls._downstream_nodes(plug))
+        visited = set()
+        driven = []
+        while queue and len(visited) < max_nodes:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            if cls._is_transform(node):
+                driven.append(node)
+                continue
+            queue.extend(cls._downstream_nodes(node))
+
+        owner_long = (cmds.ls(switch_node, long=True) or [switch_node])[0]
+        owner_movable = cls.has_settable_xform(switch_node)
+        candidates = []
+        for transform in driven:
+            transform_long = (cmds.ls(transform, long=True) or [transform])[0]
+            if transform_long == owner_long or owner_long.startswith(transform_long + "|"):
+                candidates.append(switch_node)
+                continue
+            controls = cls._controller_descendants(transform)
+            candidates.extend(controls or [transform])
+        candidates = [cls._short(c) for c in candidates]
+        candidates = [c for c in dict.fromkeys(candidates) if cls.has_settable_xform(c)]
+        if 1 <= len(candidates) <= cls.MAX_AUTO_TARGETS:
+            return candidates
+        return [switch_node] if owner_movable else []
+
     @classmethod
     def detect_xform_target(cls, switch_node, attribute, max_nodes=256):
         """Infer the control whose world pose a switch should preserve.
@@ -839,8 +881,11 @@ class SwitchCatalogBuilder(object):
                 min_value = 0.0
                 max_value = 0.0
 
+                enum_values = None
                 if is_enum:
-                    values = Maya.enum_labels(node, attr)
+                    items = Maya.enum_items(node, attr)
+                    values = [label for label, _v in items]
+                    enum_values = [v for _l, v in items]
 
                     if len(set(values)) < 2:
                         continue
@@ -868,23 +913,26 @@ class SwitchCatalogBuilder(object):
 
                 # Gimbal analysis is deferred until an option picker opens.
 
-                xform_target = node if attr == "rotateOrder" else self.detect_xform_target(node, attr)
-                entry = SwitchEntry(
-                    display_object=xform_target,
-                    attr_node=node,
-                    attr=attr,
-                    values=values,
-                    current=current,
-                    attr_type=attr_type,
-                    min_value=min_value,
-                    max_value=max_value,
-                    xform_target=xform_target,
-                    source="local",
-                    marked=Maya.keyed_values(node, attr, current),
-                    gimbal=gimbal,
-                )
-
-                self.add_entry(catalog, catalog_key, Maya.nice_name(node, attr), entry)
+                targets = [node] if attr == "rotateOrder" else self.xform_targets_for(node, attr)
+                marked = Maya.keyed_values(node, attr, current)
+                for xform_target in targets or [None]:
+                    entry = SwitchEntry(
+                        display_object=xform_target or node,
+                        attr_node=node,
+                        attr=attr,
+                        values=values,
+                        current=current,
+                        attr_type=attr_type,
+                        min_value=min_value,
+                        max_value=max_value,
+                        xform_target=xform_target,
+                        source="local",
+                        marked=marked,
+                        gimbal=gimbal,
+                        missing_target=xform_target is None,
+                        enum_values=enum_values,
+                    )
+                    self.add_entry(catalog, catalog_key, Maya.nice_name(node, attr), entry)
 
         return catalog
 
@@ -1019,6 +1067,123 @@ class SwitchCatalogBuilder(object):
                 item["matchTypes"].add(match_type)
 
         return matches
+
+    @staticmethod
+    def short_relative(node):
+        """Node name without DAG path or namespace (stable across references)."""
+        return (node or "").split("|")[-1].rpartition(":")[2]
+
+    @staticmethod
+    def namespace_of(node):
+        return (node or "").split("|")[-1].rpartition(":")[0]
+
+    @classmethod
+    def asset_nodes(cls, namespace):
+        """Every curve control in the asset namespace ("" = root namespace)."""
+        pattern = "%s:*" % namespace if namespace else "*"
+        curves = cmds.ls(pattern, type="nurbsCurve", long=True) or []
+        parents = cmds.listRelatives(curves, parent=True, fullPath=True) or [] if curves else []
+        # Rigs that tag joints/locators as controls (Maya "controller" nodes).
+        for tag in cmds.ls(pattern, type="controller") or []:
+            parents.extend(cmds.listConnections("%s.controllerObject" % tag,
+                                                source=True, destination=False) or [])
+        nodes = cmds.ls(list(dict.fromkeys(parents))) or []
+        if not namespace:
+            nodes = [n for n in nodes if ":" not in n.split("|")[-1]]
+        return nodes
+
+    def custom_entry(self, node, attr):
+        """Entry for a user-registered attribute; skips the 'connected' filter."""
+        if not Maya.exists(node) or not Maya.attr_exists(node, attr):
+            return None
+        attr_type = Maya.attr_type(node, attr)
+        if not attr_type:
+            return None
+        is_enum = attr_type == "enum"
+        if not is_enum and attr_type not in ("bool", "long", "short", "byte", "double", "float"):
+            return None
+        values, min_value, max_value, enum_values = [], 0.0, 0.0, None
+        if is_enum:
+            items = Maya.enum_items(node, attr)
+            values = [label for label, _v in items]
+            enum_values = [v for _l, v in items]
+            if len(values) < 2:
+                return None
+            max_value = float(len(values) - 1)
+        else:
+            attr_range = Maya.numeric_range(node, attr, attr_type)
+            if attr_range is None:
+                return None
+            min_value, max_value = attr_range
+        current = Maya.get_float(node, attr)
+        marked = Maya.keyed_values(node, attr, current)
+        nice = Maya.nice_name(node, attr)
+        results = []
+        for xform_target in self.xform_targets_for(node, attr) or [None]:
+            entry = SwitchEntry(
+                display_object=xform_target or node,
+                attr_node=node,
+                attr=attr,
+                values=values,
+                current=current,
+                attr_type=attr_type,
+                min_value=min_value,
+                max_value=max_value,
+                xform_target=xform_target,
+                source="custom",
+                marked=marked,
+                missing_target=xform_target is None,
+                enum_values=enum_values,
+            )
+            results.append((attr, nice, entry))
+        return results
+
+    def custom_catalog(self, nodes, custom_keys):
+        catalog = {}
+        if not custom_keys:
+            return catalog
+        wanted = {}
+        for key in custom_keys:
+            rel_node, _, attr = key.rpartition(".")
+            if rel_node and attr:
+                wanted.setdefault(rel_node, []).append(attr)
+        for node in nodes:
+            for attr in wanted.get(self.short_relative(node), []):
+                for result in self.custom_entry(node, attr) or []:
+                    self.add_entry(catalog, *result)
+        return catalog
+
+    def asset_catalog(self, namespace, custom_keys):
+        """One row per control/attribute for the whole asset (no rotate order)."""
+        nodes = self.asset_nodes(namespace)
+        custom_nodes = []
+        for key in custom_keys or []:
+            rel_node = key.rpartition(".")[0]
+            full = "%s:%s" % (namespace, rel_node) if namespace else rel_node
+            if Maya.exists(full):
+                custom_nodes.append(full)
+        previous = self.show_rotate_order
+        self.show_rotate_order = False
+        try:
+            catalog = self.combined_catalog(nodes) if nodes else {}
+        finally:
+            self.show_rotate_order = previous
+        self.merge_catalogs(catalog, self.custom_catalog(
+            list(dict.fromkeys(nodes + custom_nodes)), custom_keys))
+
+        rows = []
+        for key, data in catalog.items():
+            by_owner = OrderedDict()
+            for obj, obj_data in data.get("objects", {}).items():
+                by_owner.setdefault(obj_data.get("attr_node") or obj, OrderedDict())[obj] = obj_data
+            for owner, objects in by_owner.items():
+                first = next(iter(objects))
+                rows.append(("%s@%s" % (key, owner),
+                             {"objects": objects, "long": data.get("long", key)},
+                             (first.split("|")[-1].rpartition(":")[2].lower(),
+                              (data.get("long") or key).lower())))
+        rows.sort(key=lambda row: row[2], reverse=True)  # rows are inserted at index 0
+        return OrderedDict((key, data) for key, data, _ in rows)
 
     def combined_catalog(self, selection):
         local = self.local_catalog(selection)
@@ -1489,6 +1654,19 @@ def _multi_select_modifier_held():
         modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier)
     )
 
+def _cycle_modifier_held():
+    """Alt/Option alone: Alt+Click cycles a row to its next value."""
+    query_modifiers = getattr(
+        QtGui.QGuiApplication, "queryKeyboardModifiers", None
+    )
+    if callable(query_modifiers):
+        modifiers = query_modifiers()
+    else:
+        modifiers = QtWidgets.QApplication.keyboardModifiers()
+    return bool(modifiers & QtCore.Qt.AltModifier) and not bool(
+        modifiers & (QtCore.Qt.ControlModifier | QtCore.Qt.MetaModifier)
+    )
+
 def _populate_attribute_entry_state(entry, objects_map):
     """Populate the shared option/current/key state used by both row types."""
     entry.objects_map = objects_map
@@ -1518,13 +1696,13 @@ def _populate_attribute_entry_state(entry, objects_map):
 class _StagedAttributeEntry:
     """Non-visual per-target view of a collapsed AttributeItem."""
 
-    def __init__(self, source_item, target, object_data):
+    def __init__(self, source_item, label_node, objects):
         self.enum_attr = source_item.enum_attr
         self.object_label = source_item.parent_dialog._format_object_name(
-            [target]
+            [label_node]
         )
         self.attribute_label = source_item.attribute_label
-        _populate_attribute_entry_state(self, {target: object_data})
+        _populate_attribute_entry_state(self, objects)
 
 class _PopupOptionButton(QtWidgets.QPushButton):
     """Option button supporting menu-style press, drag, and release."""
@@ -1572,7 +1750,11 @@ class AttributePopup(QtWidgets.QWidget):
     """
 
     ALL_KEYFRAMES = "All Keyframes"
-    CURRENT_KEYFRAMES = "Current Keyframes"
+    # animBot's first scope is the current frame, or every applicable key in a
+    # highlighted Time Slider range.  It is deliberately not the Graph Editor
+    # key selection (that would make the same menu item context-dependent in a
+    # second, invisible way).
+    CURRENT_KEYFRAMES = "Current Key(s)"
 
     def __init__(self, item_widget, on_select):
         QtWidgets.QWidget.__init__(self, item_widget.window())
@@ -1696,6 +1878,12 @@ class AttributePopup(QtWidgets.QWidget):
             is_current=index in self.current_indices,
             is_keyed=index in self.marked_indices,
         )
+        if self.item_widget.enum_attr == "rotateOrder" and index < len(self.options):
+            info = self.item_widget.gimbal_info.get(self.options[index], {})
+            if info:
+                btn.setToolTip(
+                    "Animation Average Gimballed: %d%%\nAnimation Max Gimballed: %d%%"
+                    % (int(info.get("average", 0)), int(info.get("maximum", 0))))
         self._option_buttons.append(btn)
         return btn
 
@@ -1881,6 +2069,7 @@ class AttributeItem(QtWidgets.QWidget):
         self.is_toggle = self.is_enum and len(self.options) <= 2
         self._hover_active = False
         self._popup_active = False
+        self._cycle_hint = False
         self.setMouseTracking(True)
         self.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed)
         self._setup_ui()
@@ -1995,6 +2184,36 @@ class AttributeItem(QtWidgets.QWidget):
         )
         self.multi_checkbox.setVisible(should_show)
 
+    def _update_cycle_hint(self):
+        cursor_inside = self.rect().contains(
+            self.mapFromGlobal(QtGui.QCursor.pos())
+        )
+        hint = cursor_inside and _cycle_modifier_held() and self._can_quick_cycle()
+        if hint != self._cycle_hint:
+            self._cycle_hint = hint
+            self.update()
+
+    def _can_quick_cycle(self):
+        if self.is_enum:
+            return len(self.options) > 1
+        return self.max_val > self.min_val
+
+    def _next_cycle_value(self):
+        """Enums step to the next option (wrapping); numerics flip min/max."""
+        if self.is_enum:
+            return (int(self.current_idx) + 1) % len(self.options)
+        midpoint = (self.min_val + self.max_val) / 2.0
+        return self.min_val if self.current_idx >= midpoint else self.max_val
+
+    def quick_cycle(self):
+        if not self._can_quick_cycle():
+            return
+        dialog = self.parent_dialog
+        if hasattr(dialog, "_close_active_popup"):
+            dialog._close_active_popup()
+        # Uses the panel's default scope (current frame / all keys / timeline range).
+        self.on_select(self._next_cycle_value(), all_frames=dialog.all_frames)
+
     def _update_numeric_ball_pos(self):
         if self.is_enum:
             return
@@ -2070,6 +2289,21 @@ class AttributeItem(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor("#ffffff"), 1))
         painter.drawRoundedRect(rect, 2, 2)
 
+        if self._cycle_hint:
+            # Small cycle arrow just left of the pill: "Alt+Click = next value".
+            size = util.DPI(9)
+            pill = self.pill_container.geometry()
+            arc = QtCore.QRectF(pill.left() - size - util.DPI(5),
+                                pill.center().y() - size / 2.0, size, size)
+            pen = QtGui.QPen(QtGui.QColor(COLOR_TEXT_MAIN), max(1.0, util.DPI(1.4)))
+            pen.setCapStyle(QtCore.Qt.RoundCap)
+            painter.setPen(pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            painter.drawArc(arc, 60 * 16, 280 * 16)
+            tip = QtCore.QPointF(arc.right() - size * 0.12, arc.top() + size * 0.18)
+            painter.drawLine(tip, tip + QtCore.QPointF(-size * 0.35, -size * 0.08))
+            painter.drawLine(tip, tip + QtCore.QPointF(size * 0.02, size * 0.36))
+
     def enterEvent(self, event):
         self._hover_active = True
         self._update_multi_checkbox_visibility()
@@ -2083,9 +2317,19 @@ class AttributeItem(QtWidgets.QWidget):
 
     def mouseMoveEvent(self, event):
         self._update_multi_checkbox_visibility()
+        self._update_cycle_hint()
         QtWidgets.QWidget.mouseMoveEvent(self, event)
 
     def mousePressEvent(self, event):
+        if (
+            event.button() == QtCore.Qt.LeftButton
+            and _cycle_modifier_held()
+            and not self.multi_checkbox.isChecked()
+        ):
+            event.accept()
+            # Defer: applying refreshes the panel and may rebuild this row.
+            QtCore.QTimer.singleShot(0, self.quick_cycle)
+            return
         if (
             event.button() == QtCore.Qt.LeftButton
             and self.is_enum
@@ -2098,6 +2342,7 @@ class AttributeItem(QtWidgets.QWidget):
 
     def leaveEvent(self, event):
         self._hover_active = self._popup_active
+        self._cycle_hint = False
         if not self.multi_checkbox.isChecked():
             self.multi_checkbox.hide()
         self.update()
@@ -2161,8 +2406,23 @@ class AttributeItem(QtWidgets.QWidget):
                 all_frames_override=all_frames,
             )
 
+    def sync_current(self):
+        """Refresh the shown value from objects_map without rebuilding the row."""
+        _populate_attribute_entry_state(self, self.objects_map)
+        if self.is_enum:
+            if self.options:
+                index = max(0, min(int(round(self.current_idx)), len(self.options) - 1))
+                self.val_label.setText(self.options[index])
+        else:
+            self.val_label.setText("{:.2f}".format(self.current_idx))
+            self._update_numeric_ball_pos()
+        self._refresh_pill_style()
+        self.update()
+
     def currentText(self):
-        return self.options[int(self.current_idx)] if self.options else ""
+        if not self.options:
+            return ""
+        return self.options[max(0, min(int(round(self.current_idx)), len(self.options) - 1))]
 
 
 class MultiAttributeSwitchDialog(FloatingWidget):
@@ -2425,94 +2685,108 @@ class MultiAttributeSwitchDialog(FloatingWidget):
         self.show()
         self.raise_()
 
-class TargetItemWidget(QWidget):
-    def __init__(self, name, list_ref):
-        QWidget.__init__(self)
+class _TargetRow(QWidget):
+    """One xform target, styled like the switch rows. Hover shows the remove X."""
 
+    def __init__(self, name, on_remove, on_isolate, parent=None):
+        QWidget.__init__(self, parent)
         self.name = name
-        self.list_ref = list_ref
+        self._on_remove = on_remove
+        self._on_isolate = on_isolate
+        self._hover = False
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(util.DPI(24))
+        self.setToolTip("%s<br><br>Click: keep only this target<br>X: remove it" % name)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(4)
+        layout.setContentsMargins(util.DPI(8), 0, util.DPI(4), 0)
+        layout.setSpacing(util.DPI(4))
 
-        label = QLabel(name.split(":")[-1])
+        short = name.split("|")[-1]
+        namespace, _, base = short.rpartition(":")
+        self.label = QLabel(
+            ('<span style="color:%s">%s:</span>%s' % (COLOR_ACCENT_DARK, namespace, base))
+            if namespace else base)
+        self.label.setStyleSheet("color: %s; font-size: %spx; background: transparent;"
+                                 % (COLOR_TEXT_MAIN, util.DPI(11)))
+        self.label.setAttribute(Qt.WA_TransparentForMouseEvents)
 
-        close_btn = QPushButton()
-        base_widgets.QFlatHoverableIcon.apply(close_btn, util.return_icon_path("close"))
-        close_btn.setIconSize(QSize(15, 15))
-        close_btn.setFixedSize(15, 15)
-        close_btn.setFocusPolicy(Qt.NoFocus)
-        close_btn.clicked.connect(self._remove)
-        close_btn.setStyleSheet(
-            """
-            QPushButton {
-                border: none;
-                background: transparent;
-                padding: 0px;
-                margin: 0px;
-            }
-            QPushButton:pressed {
-                background: #101010;
-            }
-            """
-        )
+        self.remove_btn = QPushButton(u"✕")
+        self.remove_btn.setFixedSize(util.DPI(18), util.DPI(18))
+        self.remove_btn.setFocusPolicy(Qt.NoFocus)
+        self.remove_btn.setCursor(Qt.PointingHandCursor)
+        self.remove_btn.setToolTip(_t("Remove this Xform Target"))
+        self.remove_btn.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:%s;font-size:%spx;}"
+            "QPushButton:hover{color:#000000;}" % (COLOR_ACCENT_DARK, util.DPI(11)))
+        policy = self.remove_btn.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.remove_btn.setSizePolicy(policy)
+        self.remove_btn.setVisible(False)
+        self.remove_btn.clicked.connect(lambda *a: self._on_remove(self.name))
 
-        layout.addWidget(label)
-        layout.addStretch()
-        layout.addWidget(close_btn)
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.remove_btn)
 
-    def _remove(self):
-        self.list_ref.remove_target(self.name)
+    def enterEvent(self, event):
+        self._hover = True
+        self.remove_btn.setVisible(True)
+        self.update()
+        QWidget.enterEvent(self, event)
 
+    def leaveEvent(self, event):
+        self._hover = False
+        self.remove_btn.setVisible(False)
+        self.update()
+        QWidget.leaveEvent(self, event)
 
-class TargetsList(QListWidget):
-    def __init__(self, parent=None):
-        QListWidget.__init__(self, parent)
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.pos()):
+            self._on_isolate(self.name)
+        QWidget.mouseReleaseEvent(self, event)
 
-        self.backing_store = []
-        self.setStyleSheet(
-            """
-            QListWidget:focus {
-                outline: none;
-                border: none;
-            }
-            """
-        )
-
-    def add_target(self, name):
-        if not Maya.exists(name) or name in self.backing_store:
-            return
-
-        self.backing_store.append(name)
-
-        item = QListWidgetItem()
-        item.setFlags(Qt.NoItemFlags)
-
-        widget = TargetItemWidget(name, self)
-        item.setSizeHint(widget.sizeHint())
-
-        self.addItem(item)
-        self.setItemWidget(item, widget)
-
-    def remove_target(self, name):
-        if name in self.backing_store:
-            self.backing_store.remove(name)
-
-        for i in range(self.count()):
-            widget = self.itemWidget(self.item(i))
-
-            if widget and widget.name == name:
-                self.takeItem(i)
-                break
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(COLOR_ACCENT_WHITE if self._hover else COLOR_ACCENT_MAIN))
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                util.DPI(3), util.DPI(3))
 
 
 class SetupTargetsDialog(FloatingWidget):
-    def __init__(self, parent, objects_dict, on_close):
+    """animBot-style Xform Target setup, driven by the Maya selection.
+
+    Current targets get selected; whatever transforms you select become the
+    xform targets of this switch, live. Finish (Enter) or deselect everything
+    to keep them; Cancel (Esc) keeps the old ones.
+    """
+
+    HELP = ("Xform targets are the transforms kept in place when this attribute "
+            "switches. Usually it's the control that owns the switch; if your rig "
+            "moves a different control (or several), select those instead.")
+    MAX_VISIBLE_ROWS = 8
+    WIDTH = 270
+
+    def __init__(self, parent, objects_dict, on_close, switch_label=""):
         FloatingWidget.__init__(self, popup=False, parent=parent)
 
         self.on_close = on_close
         self.objects_dict = objects_dict
+        self.switch_label = switch_label
+        self._result = None
+        self._finished = False
+        self._targets = [t for t, d in objects_dict.items()
+                         if not d.get("missing_target") and Maya.exists(t)]
+        self._initial_targets = list(self._targets)
+        self._rows = OrderedDict()
+        self._callbacks = CallbackManager()
+
+        self._selection_timer = QTimer(self)
+        self._selection_timer.setSingleShot(True)
+        self._selection_timer.setInterval(30)  # coalesce marquee / outliner bursts
+        self._selection_timer.timeout.connect(self._on_selection_changed)
 
         if parent and hasattr(parent, "_suspend_auto_close"):
             parent._suspend_auto_close()
@@ -2521,56 +2795,236 @@ class SetupTargetsDialog(FloatingWidget):
         self.setBottomBar(
             [
                 base_widgets.QFlatDialogButton(
-                    "Add",
-                    callback=self._add_target,
-                    icon=util.return_icon_path("add"),
-                    highlight=True,
-                )
+                    "Finish", callback=self.finish,
+                    icon=util.return_icon_path("apply"), highlight=True,
+                ),
+                base_widgets.QFlatDialogButton(
+                    "Cancel", callback=self.cancel,
+                    icon=util.return_icon_path("cancel"),
+                ),
             ],
-            closeButton=True,
+            closeButton=False,
             spacing=util.DPI(2),
         )
+        self.setFixedWidth(util.DPI(self.WIDTH))
 
+        if self._targets:
+            cmds.select(self._targets, replace=True)
+        else:
+            cmds.select(clear=True)
+        self._sync_rows(invalid=0)
+        self._callbacks.add(om.MEventMessage.addEventCallback(
+            "SelectionChanged", lambda *a: self._selection_timer.start()))
+
+    # --- layout ---------------------------------------------------------------
     def _create_layouts(self):
-        title = QLabel("Xform targets")
-        title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        title.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 4px;")
+        self.mainLayout.setContentsMargins(util.DPI(10), util.DPI(10), util.DPI(10), util.DPI(6))
+        self.mainLayout.setSpacing(util.DPI(6))
 
-        self.targets_list = TargetsList(self)
-        self.targets_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        header = QHBoxLayout()
+        header.setSpacing(util.DPI(6))
+        icon = QLabel()
+        size = util.DPI(20)
+        icon.setFixedSize(size, size)
+        icon.setPixmap(QIcon(util.return_icon_path("spaceswitch.svg")).pixmap(size, size))
+        title = QLabel(_t("Xform Targets"))
+        title.setStyleSheet("font-size: %spx; font-weight: bold; color: %s; background: transparent;"
+                            % (util.DPI(15), COLOR_TEXT_SECONDARY))
+        self.help_button = QPushButton("?")
+        self.help_button.setCheckable(True)
+        self.help_button.setFixedSize(util.DPI(18), util.DPI(18))
+        self.help_button.setCursor(Qt.PointingHandCursor)
+        self.help_button.setFocusPolicy(Qt.NoFocus)
+        self.help_button.setToolTip(_t("What is a Xform Target?"))
+        self.help_button.setStyleSheet(
+            "QPushButton{border:1px solid %s;border-radius:%spx;color:%s;background:transparent;}"
+            "QPushButton:hover,QPushButton:checked{border-color:%s;color:%s;}"
+            % (COLOR_TEXT_SECONDARY, util.DPI(9), COLOR_TEXT_SECONDARY, COLOR_ACCENT_LIGHT, COLOR_ACCENT_LIGHT))
+        header.addWidget(icon)
+        header.addWidget(title, 1)
+        header.addWidget(self.help_button)
 
-        for target in list(self.objects_dict.keys()):
-            self.targets_list.add_target(target)
+        switch_name = QLabel(self.switch_label or "")
+        switch_name.setStyleSheet(
+            "color: %s; background: %s; border-radius: %spx; padding: %spx %spx; font-size: %spx;"
+            % (COLOR_ACCENT_WHITE, COLOR_BLEND_MULTI, util.DPI(3), util.DPI(3), util.DPI(6), util.DPI(11)))
+        switch_name.setVisible(bool(self.switch_label))
 
-        self.mainLayout.addWidget(title)
-        self.mainLayout.addWidget(self.targets_list)
+        self.help_label = QLabel(_t(self.HELP))
+        self.help_label.setWordWrap(True)
+        self.help_label.setStyleSheet("color: %s; font-size: %spx; background: transparent;"
+                                      % (COLOR_TEXT_SECONDARY, util.DPI(10)))
+        self.help_label.setVisible(False)
+        self.help_button.toggled.connect(self._toggle_help)
 
-    def _add_target(self):
-        for obj in Maya.selection():
-            self.targets_list.add_target(obj)
+        self.count_label = QLabel()
+        self.count_label.setStyleSheet("color: %s; font-size: %spx; background: transparent;"
+                                       % (COLOR_TEXT_SECONDARY, util.DPI(11)))
+
+        self.rows_container = QWidget()
+        self.rows_layout = QVBoxLayout(self.rows_container)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(util.DPI(2))
+        self.rows_scroll = QtWidgets.QScrollArea()
+        self.rows_scroll.setWidget(self.rows_container)
+        self.rows_scroll.setWidgetResizable(True)
+        self.rows_scroll.setFrameShape(QFrame.NoFrame)
+        self.rows_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.rows_scroll.setStyleSheet(
+            "QScrollArea{background:transparent;border:none;}"
+            "QScrollArea > QWidget > QWidget{background:transparent;}")
+
+        self.empty_label = QLabel(_t("Select the control(s) to keep in place when switching."))
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setStyleSheet(
+            "color: %s; border: 1px dashed %s; border-radius: %spx; padding: %spx; background: transparent;"
+            % (COLOR_TEXT_SECONDARY, "#555555", util.DPI(4), util.DPI(10)))
+
+        self.note_label = QLabel()
+        self.note_label.setWordWrap(True)
+        self.note_label.setStyleSheet("color: #e0b060; font-size: %spx; background: transparent;" % util.DPI(10))
+        self.note_label.setVisible(False)
+
+        hint = QLabel(_t("Enter / deselect all: finish  ·  Esc: cancel"))
+        hint.setStyleSheet("color: #808080; font-size: %spx; background: transparent;" % util.DPI(10))
+
+        self.mainLayout.addLayout(header)
+        self.mainLayout.addWidget(switch_name)
+        self.mainLayout.addWidget(self.help_label)
+        self.mainLayout.addWidget(self.count_label)
+        self.mainLayout.addWidget(self.rows_scroll)
+        self.mainLayout.addWidget(self.empty_label)
+        self.mainLayout.addWidget(self.note_label)
+        self.mainLayout.addWidget(hint)
+
+    def _toggle_help(self, checked):
+        self.help_label.setVisible(checked)
+        self._fit_height()
+
+    # --- live selection ------------------------------------------------------
+    @staticmethod
+    def _split_targets(nodes):
+        valid, invalid = [], 0
+        for node in nodes:
+            if SwitchCatalogBuilder._is_transform(node) and SwitchCatalogBuilder.has_settable_xform(node):
+                valid.append(node)
+            else:
+                invalid += 1
+        return valid, invalid
+
+    def _on_selection_changed(self):
+        if self._finished or not util.is_valid_widget(self):
+            return
+        selection = Maya.selection(long=False)
+        valid, invalid = self._split_targets(selection)
+        if not selection:
+            if self._targets:
+                self.finish()  # deselecting all finishes the setup (last targets kept)
+            return
+        if valid != self._targets:
+            self._targets = valid
+        self._sync_rows(invalid)
+
+    def _remove_target(self, name):
+        if Maya.exists(name):
+            cmds.select(name, deselect=True)
+
+    def _isolate_target(self, name):
+        if Maya.exists(name):
+            cmds.select(name, replace=True)
+
+    def _sync_rows(self, invalid):
+        """Diff the row widgets against the targets: no full rebuild, no flicker."""
+        self.rows_container.setUpdatesEnabled(False)
+        try:
+            for name in [n for n in self._rows if n not in self._targets]:
+                row = self._rows.pop(name)
+                self.rows_layout.removeWidget(row)
+                row.deleteLater()
+            for index, name in enumerate(self._targets):
+                row = self._rows.get(name)
+                if row is None:
+                    row = _TargetRow(name, self._remove_target, self._isolate_target, self.rows_container)
+                    self._rows[name] = row
+                if self.rows_layout.indexOf(row) != index:
+                    self.rows_layout.removeWidget(row)
+                    self.rows_layout.insertWidget(index, row)
+        finally:
+            self.rows_container.setUpdatesEnabled(True)
+
+        count = len(self._targets)
+        self.count_label.setText(_t("%d object%s as Xform Target%s of this Switch") % (
+            count, "" if count == 1 else "s", "" if count == 1 else "s"))
+        self.rows_scroll.setVisible(bool(count))
+        self.empty_label.setVisible(not count)
+        self.note_label.setVisible(bool(invalid))
+        if invalid:
+            self.note_label.setText(_t("%d selected object%s can't be a xform target "
+                                       "(not a transform, or translate/rotate locked).")
+                                    % (invalid, "" if invalid == 1 else "s"))
+        self._fit_height()
+
+    def _fit_height(self):
+        """Grow with the list up to MAX_VISIBLE_ROWS, then scroll; keep the top edge."""
+        rows = len(self._targets)
+        row_h = util.DPI(24) + self.rows_layout.spacing()
+        self.rows_scroll.setFixedHeight(max(1, min(rows, self.MAX_VISIBLE_ROWS)) * row_h)
+        top_left = self.pos()
+        self.mainLayout.activate()
+        self.root_layout.activate()
+        self.adjustSize()
+        if self.isVisible():
+            self.move(top_left)
+
+    # --- keys / closing --------------------------------------------------------
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.finish()
+            return
+        if event.key() == Qt.Key_Escape:
+            self.cancel()
+            return
+        FloatingWidget.keyPressEvent(self, event)
+
+    def reject(self):  # QDialog's own Esc path would skip our cleanup
+        self.cancel()
+
+    def finish(self):
+        self._result = list(self._targets) or None
+        self.close()
+
+    def cancel(self):
+        self._result = None
+        self.close()
 
     def closeEvent(self, event):
-        order = self.targets_list.backing_store
-        original_values = list(self.objects_dict.values())
-        fallback = original_values[0] if original_values else {}
-
-        new_dict = {}
-
-        for target in order:
-            new_dict[target] = dict(self.objects_dict.get(target, fallback))
-            new_dict[target]["xform_target"] = target
-
-        self.objects_dict.clear()
-        self.objects_dict.update(new_dict)
-
-        if callable(self.on_close):
-            self.on_close(self.objects_dict.keys())
-
-        parent = self.parent()
-
-        if parent and hasattr(parent, "_resume_auto_close"):
-            parent._resume_auto_close()
-
+        if not self._finished:
+            self._finished = True
+            self._selection_timer.stop()
+            self._callbacks.clear()
+            changed = self._result is not None and self._result != self._initial_targets
+            if changed:
+                original_values = list(self.objects_dict.values())
+                fallback = original_values[0] if original_values else {}
+                new_dict = OrderedDict()
+                for target in self._result:
+                    new_dict[target] = dict(self.objects_dict.get(target, fallback))
+                    new_dict[target]["xform_target"] = target
+                    new_dict[target]["missing_target"] = False
+                self.objects_dict.clear()
+                self.objects_dict.update(new_dict)
+            try:
+                cmds.inViewMessage(
+                    amg=_t("Xform Target Setup Complete") if changed else _t("Xform Target Setup Skipped"),
+                    pos="midCenterTop", fade=True)
+            except Exception:
+                pass
+            if callable(self.on_close):
+                self.on_close(list(self._result) if changed else None)
+            parent = self.parent()
+            if parent and hasattr(parent, "_resume_auto_close"):
+                parent._resume_auto_close()
         FloatingWidget.closeEvent(self, event)
 
 
@@ -2664,11 +3118,256 @@ class Timeline(QWidget):
             pass
 
 
+class OperationCancelled(Exception):
+    """Raised inside a switch when Esc / the progress bar cancel is pressed."""
+
+    def __init__(self, wrote=False):
+        Exception.__init__(self, "SpaceSwitch cancelled")
+        self.wrote = wrote
+
+
+class _MainThreadMarshal(QtCore.QObject):
+    """Run a callable on Maya's main thread and block the calling worker.
+
+    maya.cmds is not thread-safe: every scene read/write hops back here.
+    Created lazily from the main thread, so its thread affinity is correct.
+    """
+
+    _request = QtCore.Signal(object)
+
+    def __init__(self):
+        QtCore.QObject.__init__(self)
+        self._request.connect(self._run, QtCore.Qt.QueuedConnection)
+
+    def _run(self, job):
+        fn, args, kwargs, event, box = job
+        try:
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as exc:  # re-raised on the worker
+            box["error"] = exc
+            box["trace"] = traceback.format_exc()
+        finally:
+            event.set()
+
+    def call(self, fn, *args, **kwargs):
+        if QtCore.QThread.currentThread() == self.thread():
+            return fn(*args, **kwargs)
+        event = threading.Event()
+        box = {}
+        self._request.emit((fn, args, kwargs, event, box))
+        event.wait()
+        if "error" in box:
+            if not isinstance(box["error"], OperationCancelled):
+                print(box.get("trace", ""))
+            raise box["error"]
+        return box.get("value")
+
+
+_MARSHAL = []
+
+
+def _main_thread_marshal():
+    if not _MARSHAL:
+        _MARSHAL.append(_MainThreadMarshal())
+    return _MARSHAL[0]
+
+
+class _CoordinatorThread(QtCore.QThread):
+    def __init__(self, fn):
+        QtCore.QThread.__init__(self)
+        self._fn = fn
+        self.outcome = {}
+
+    def run(self):
+        try:
+            self.outcome["value"] = self._fn()
+        except BaseException as exc:
+            self.outcome["error"] = exc
+
+
+class _InputBlocker(QtCore.QObject):
+    """While a switch runs: Esc cancels, all other user input is swallowed.
+
+    The main event loop stays alive (painting, progress, cancel) but nobody can
+    scrub, select or edit the scene in the middle of a multi-frame write.
+    """
+
+    BLOCKED = (
+        QtCore.QEvent.KeyPress, QtCore.QEvent.KeyRelease,
+        QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+        QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.Wheel,
+        QtCore.QEvent.ShortcutOverride,
+    )
+
+    def __init__(self, runner):
+        QtCore.QObject.__init__(self)
+        self._runner = runner
+
+    def eventFilter(self, watched, event):
+        etype = event.type()
+        if etype not in self.BLOCKED:
+            return False
+        if etype == QtCore.QEvent.KeyPress and event.key() == QtCore.Qt.Key_Escape:
+            self._runner.cancel()
+        return True
+
+
+class OperationRunner(object):
+    """TKM-style cooperative operation: coordinator on a worker, Maya on main.
+
+    Small jobs run inline (thread start + marshalling costs more than it saves).
+    Larger ones run their coordinator on a QThread while a local QEventLoop
+    keeps Maya responsive, so Esc is seen immediately, not between batches.
+    """
+
+    INLINE_MAX_STEPS = 8
+    SHOW_AFTER_MS = 300
+    POLL_MS = 50
+
+    def __init__(self, status="SpaceSwitch"):
+        self.status = status
+        self.total = 0
+        self.done = 0
+        self._cancelled = False
+        self._bar = None
+        self.threaded = False
+        self.wrote = False
+
+    # --- called from the coordinator ------------------------------------------
+    def main(self, fn, *args, **kwargs):
+        return _main_thread_marshal().call(fn, *args, **kwargs)
+
+    def set_total(self, total):
+        self.total = max(0, int(total))
+
+    def step(self, status=None):
+        self.done += 1
+        if status:
+            self.status = status
+        return self._cancelled
+
+    @property
+    def cancelled(self):
+        return self._cancelled
+
+    def cancel(self):
+        self._cancelled = True
+
+    def check(self, wrote=None):
+        if self._cancelled:
+            raise OperationCancelled(self.wrote if wrote is None else wrote)
+
+    # --- main thread ----------------------------------------------------------
+    def _start_bar(self):
+        if self._bar is not None:
+            return
+        try:
+            self._bar = mel.eval("$tmp = $gMainProgressBar")
+            cmds.progressBar(self._bar, edit=True, beginProgress=True, isInterruptable=True,
+                             status="%s  (Esc to cancel)" % self.status,
+                             maxValue=max(1, self.total))
+        except Exception:
+            self._bar = None
+
+    def _poll(self):
+        if self._bar is None:
+            return
+        try:
+            cmds.progressBar(self._bar, edit=True, progress=min(self.done, max(1, self.total)),
+                             maxValue=max(1, self.total), status="%s  (Esc to cancel)" % self.status)
+            if cmds.progressBar(self._bar, query=True, isCancelled=True):
+                self._cancelled = True
+        except Exception:
+            pass
+
+    def _end_bar(self):
+        if self._bar is not None:
+            try:
+                cmds.progressBar(self._bar, edit=True, endProgress=True)
+            except Exception:
+                pass
+        self._bar = None
+
+    def run(self, coordinator, estimated_steps):
+        """Run coordinator(runner); returns its value or raises its exception."""
+        if estimated_steps < self.INLINE_MAX_STEPS:
+            return coordinator(self)
+
+        self.threaded = True
+        app = QtCore.QCoreApplication.instance()
+        blocker = _InputBlocker(self)
+        loop = QtCore.QEventLoop()
+        worker = _CoordinatorThread(lambda: coordinator(self))
+        worker.finished.connect(loop.quit)
+        show_timer = QtCore.QTimer()
+        show_timer.setSingleShot(True)
+        show_timer.timeout.connect(self._start_bar)
+        poll_timer = QtCore.QTimer()
+        poll_timer.setInterval(self.POLL_MS)
+        poll_timer.timeout.connect(self._poll)
+
+        _main_thread_marshal()  # make sure it is created on this (main) thread
+        if app is not None:
+            app.installEventFilter(blocker)
+        try:
+            show_timer.start(self.SHOW_AFTER_MS)
+            poll_timer.start()
+            worker.start()
+            if worker.isRunning():
+                run_loop = getattr(loop, "exec") if PYSIDE_VERSION == 6 else loop.exec_
+                run_loop()
+            worker.wait()
+        finally:
+            show_timer.stop()
+            poll_timer.stop()
+            if app is not None:
+                app.removeEventFilter(blocker)
+            self._end_bar()
+
+        if "error" in worker.outcome:
+            raise worker.outcome["error"]
+        return worker.outcome.get("value")
+
+
 class SwitchExecutor(object):
     ROTATE_AXES = ("rotateX", "rotateY", "rotateZ")
+    CHANNELS = ("translateX", "translateY", "translateZ",
+                "rotateX", "rotateY", "rotateZ",
+                "scaleX", "scaleY", "scaleZ")
+    EPSILON = 1e-5
 
     def __init__(self, owner):
         self.owner = owner
+        self.issues = []  # human-readable skipped/partial results of the last run
+
+    @classmethod
+    def transform_key_times(cls, node):
+        """Key times animBot considers for a pose-preserving space switch.
+
+        Scale curves do not define switch samples in the reference tool; the
+        evaluated world matrix at translation/rotation and switch keys already
+        contains scale, while sampling scale-only keys creates surprising extra
+        switch keys.
+        """
+        if not node or not Maya.exists(node):
+            return set()
+        times = set()
+        for channel in cls.CHANNELS[:6]:
+            times.update(Maya.key_times_for_plug(Maya.plug(node, channel)))
+        return times
+
+    # --- frame selection ------------------------------------------------------
+    @staticmethod
+    def selected_key_times(operations):
+        """Key times selected in the Graph Editor/Dope Sheet on the involved nodes."""
+        nodes = []
+        for operation in operations:
+            nodes.extend([operation.xform_target, operation.attr_node])
+        nodes = [n for n in dict.fromkeys(nodes) if Maya.exists(n)]
+        if not nodes:
+            return []
+        times = cmds.keyframe(nodes, query=True, selected=True, timeChange=True) or []
+        return sorted(set(times))
 
     def collect_frames(self, operations, all_frames, timeline_selection, current_frames):
         current_time = cmds.currentTime(query=True)
@@ -2676,14 +3375,48 @@ class SwitchExecutor(object):
             return [current_time]
         frames = set()
         for operation in operations:
-            frames.update(Maya.key_times_for_node(operation.xform_target))
+            frames.update(self.transform_key_times(operation.xform_target))
             frames.update(Maya.key_times_for_plug(operation.plug))
         if timeline_selection:
             start, end = current_frames
             frames = {frame for frame in frames if start <= frame < end}
+            if not frames:  # empty range: switch where the user is looking
+                return [current_time if start <= current_time < end else start]
             return sorted(frames)
         return sorted(frames) or [current_time]
 
+    @staticmethod
+    def _value_at(plug, frame):
+        try:
+            return float(cmds.getAttr(plug, time=frame))
+        except Exception:
+            return None
+
+    @staticmethod
+    def guard_frames(frames, target_times, switch_times):
+        """Neighbouring keys that must keep the OLD space after a partial switch.
+
+        Keying the switch on a subset of frames would otherwise hold the new
+        value until the next switch key and pop every later (and, for a first
+        switch key, every earlier) pose. Step guard keys restore the original
+        value on the nearest unswitched key on each side.
+        """
+        frames = set(frames)
+        switch_times = set(switch_times)
+        ordered = sorted(set(target_times) | switch_times)
+        guards = set()
+        lowest = min(frames)
+        if not any(t < lowest for t in switch_times):
+            before = [t for t in target_times if t < lowest]
+            if before:
+                guards.add(max(before))
+        for frame in frames:
+            index = bisect.bisect_right(ordered, frame)
+            if index < len(ordered) and ordered[index] not in frames:
+                guards.add(ordered[index])
+        return sorted(guards - switch_times - frames)
+
+    # --- fast rotate order (pure curve math, no time changes) -----------------
     def _rotate_order_fast_eligible(self, operation):
         node = operation.xform_target
         if operation.attr != "rotateOrder" or operation.attr_node != node:
@@ -2743,83 +3476,233 @@ class SwitchExecutor(object):
                     cmds.setAttr(plug, value)
         cmds.setAttr(operation.plug, operation.value)
 
-    @staticmethod
-    def _write_attribute(operation, frame, keyed):
-        if keyed or Maya.key_times_for_plug(operation.plug):
-            cmds.setKeyframe(operation.plug, time=(frame, frame), value=operation.value,
-                             outTangentType="step")
-        else:
-            cmds.setAttr(operation.plug, operation.value)
-
-    def apply_requests(self, requests, timeline_selection, selected_range):
-        """Capture the entire batch before writing, then compensate parent first."""
-        scheduled = {}
-        fast = []
-        seen = {}
+    # --- planning (main thread) -----------------------------------------------
+    def _plan(self, requests, timeline_selection, selected_range):
+        """One job per switch plug; a plug can hold several xform targets."""
+        groups = OrderedDict()
         for operations, all_frames in requests:
             for operation in operations:
                 if not operation.is_valid():
                     continue
-                if operation.plug in seen and seen[operation.plug] != operation.value:
+                group = groups.get(operation.plug)
+                if group is None:
+                    group = groups[operation.plug] = {"ops": [], "value": operation.value,
+                                                      "all_frames": False}
+                elif group["value"] != operation.value:
                     raise ValueError("Conflicting choices for {}".format(operation.plug))
-                seen[operation.plug] = operation.value
-                if (self.owner.fast_rotation_order and not timeline_selection
-                        and self._rotate_order_fast_eligible(operation)):
-                    if not any(item[0].plug == operation.plug for item in fast):
-                        fast.append(self._prepare_rotation(operation))
+                group["all_frames"] = group["all_frames"] or bool(all_frames)
+                if not any(o.xform_target == operation.xform_target for o in group["ops"]):
+                    group["ops"].append(operation)
+
+        jobs, fast = [], []
+        self.issues = []
+        for plug, group in groups.items():
+            ops, operation, all_frames = group["ops"], group["ops"][0], group["all_frames"]
+            try:
+                settable = cmds.getAttr(plug, settable=True)
+            except Exception:
+                settable = False
+            if not settable:
+                self.issues.append("%s is locked or driven, not switched" % plug)
+                continue
+            if (len(ops) == 1 and self.owner.fast_rotation_order and not timeline_selection
+                    and self._rotate_order_fast_eligible(operation)):
+                if int(cmds.getAttr(operation.plug)) != int(operation.value):
+                    fast.append(self._prepare_rotation(operation))
+                continue
+
+            switch_times = Maya.key_times_for_plug(plug)
+            target_times = set()
+            for op in ops:
+                if op.xform_target:
+                    target_times |= self.transform_key_times(op.xform_target)
+            frames = self.collect_frames(
+                ops, all_frames, timeline_selection, selected_range)
+            # Anything animated is keyed, so the rest of the shot never pops.
+            keyed = bool(all_frames or timeline_selection or switch_times or target_times)
+            target_value = float(operation.value)
+            pending = []
+            for frame in frames:
+                current = self._value_at(operation.plug, frame)
+                if current is None or abs(current - target_value) > self.EPSILON:
+                    pending.append(frame)
+            frames = pending
+            if not frames:
+                continue  # already in that space everywhere asked: nothing to do
+            guards = {}
+            if keyed and not all_frames:
+                for frame in self.guard_frames(frames, target_times, switch_times):
+                    value = self._value_at(operation.plug, frame)
+                    if value is not None and abs(value - target_value) > self.EPSILON:
+                        guards[frame] = value
+            jobs.append({"op": operation, "ops": ops, "frames": frames,
+                         "keyed": keyed, "guards": guards})
+        return jobs, fast
+
+    # --- writing (main thread, one call per step) ------------------------------
+    @staticmethod
+    def _capture(frame, targets):
+        return {target: cmds.getAttr("%s.worldMatrix[0]" % target, time=frame)
+                for target in targets}
+
+    def _begin_write(self, schedule, targets):
+        ctx = {
+            "current_time": cmds.currentTime(query=True),
+            "auto_key": cmds.autoKeyframe(query=True, state=True),
+            "marker": None,
+            "depth": {},
+            "channels": {},
+            "warned": set(),
+        }
+        for target in targets:
+            paths = cmds.ls(target, long=True) or [target]
+            ctx["depth"][target] = paths[0].count("|")
+            settable, animated, layered, locked = [], set(), [], []
+            for channel in self.CHANNELS:
+                plug = Maya.plug(target, channel)
+                try:
+                    if cmds.getAttr(plug, settable=True):
+                        settable.append(channel)
+                    else:
+                        sources = cmds.listConnections(plug, source=True, destination=False,
+                                                       skipConversionNodes=True) or []
+                        if any(cmds.nodeType(n).startswith("animBlendNode") for n in sources):
+                            layered.append(channel)
+                        elif channel not in self.CHANNELS[6:]:
+                            locked.append(channel)
+                except Exception:
                     continue
-                frames = self.collect_frames([operation], all_frames,
-                                             timeline_selection, selected_range)
-                keyed = all_frames or timeline_selection
-                for frame in frames:
-                    scheduled.setdefault(frame, []).append((operation, keyed))
-        if not scheduled and not fast:
-            return set()
-        current_time = cmds.currentTime(query=True)
-        auto_key = cmds.autoKeyframe(query=True, state=True)
-        marker = None
-        snapshots = {}
+                if Maya.key_times_for_plug(plug):
+                    animated.add(channel)
+            ctx["channels"][target] = (settable, animated)
+            if layered:
+                self.issues.append("%s: %s are in animation layers, pose not matched on them"
+                                   % (target, ", ".join(layered)))
+            elif locked and len(locked) < 6:
+                self.issues.append("%s: %s locked/driven, pose may not match exactly"
+                                   % (target, ", ".join(locked)))
+        cmds.autoKeyframe(state=False)
+        if len(schedule) > 1:
+            ctx["marker"] = Timeline.create([min(schedule), max(schedule) + 1])
+        return ctx
+
+    @staticmethod
+    def _write_switches(jobs, fast, executor):
+        for job in jobs:
+            operation = job["op"]
+            if job["keyed"]:
+                for frame in job["frames"]:
+                    cmds.setKeyframe(operation.plug, time=(frame, frame), value=operation.value,
+                                     outTangentType="step")
+                for frame, value in job["guards"].items():
+                    cmds.setKeyframe(operation.plug, time=(frame, frame), value=value,
+                                     outTangentType="step")
+            else:
+                cmds.setAttr(operation.plug, operation.value)
+        for prepared in fast:
+            executor._apply_rotation(prepared)
+
+    def _channel_values(self, target):
+        values = {}
+        for compound, axes in (("translate", self.CHANNELS[0:3]),
+                               ("rotate", self.CHANNELS[3:6]),
+                               ("scale", self.CHANNELS[6:9])):
+            try:
+                values.update(zip(axes, cmds.getAttr("%s.%s" % (target, compound))[0]))
+            except Exception:
+                pass
+        return values
+
+    def _compensate_frame(self, frame, targets, snapshot, ctx):
+        # update=False: only the nodes we pull are evaluated, not the whole scene.
+        cmds.currentTime(frame, update=False)
+        for target in sorted(targets, key=lambda t: ctx["depth"].get(t, 0)):
+            settable, animated = ctx["channels"][target]
+            before = self._channel_values(target)
+            try:
+                Maya.set_matrix(target, snapshot[target])
+            except RuntimeError as exc:
+                if target not in ctx["warned"]:
+                    ctx["warned"].add(target)
+                    self.issues.append("%s: could not match pose (%s)" % (target, exc))
+                continue
+            after = self._channel_values(target)
+            may_key = targets[target] or ctx["auto_key"]
+            # Animated channels always get a key (pose locked at the switch);
+            # static ones only when compensation actually moved them.
+            to_key = [channel for channel in settable
+                      if channel in animated
+                      or (may_key and abs(after.get(channel, 0.0) - before.get(channel, 0.0)) > self.EPSILON)]
+            if to_key:
+                cmds.setKeyframe(target, attribute=to_key, time=(frame, frame))
+
+    @staticmethod
+    def _end_write(ctx):
         try:
-            if scheduled:
-                marker = Timeline.create([min(scheduled), max(scheduled) + 1])
-                with UndoDisabled():
-                    with ProgressBar(len(scheduled), status="Saving Positions...") as progress:
-                        for frame, entries in sorted(scheduled.items()):
-                            if progress.step():
-                                return set()
-                            cmds.currentTime(frame)
-                            snapshots[frame] = {op.xform_target: Maya.matrix(op.xform_target)
-                                                for op, _ in entries}
-            cmds.autoKeyframe(state=False)
-            for prepared in fast:
-                self._apply_rotation(prepared)
-            with ProgressBar(len(scheduled), status="Applying Positions...", interruptable=False) as progress:
-                for frame, entries in sorted(scheduled.items()):
-                    cmds.currentTime(frame)
-                    # All switches first, then one compensation per target. This
-                    # prevents one staged channel from invalidating another.
-                    for operation, keyed in entries:
-                        self._write_attribute(operation, frame, keyed)
-                    def depth(target):
-                        paths = cmds.ls(target, long=True) or [target]
-                        return paths[0].count("|")
-                    for target in sorted(snapshots[frame], key=depth):
-                        Maya.set_matrix(target, snapshots[frame][target])
-                        target_entries = [(op, keyed) for op, keyed in entries if op.xform_target == target]
-                        for attr in ("tx", "ty", "tz", "rx", "ry", "rz", "sx", "sy", "sz"):
-                            plug = Maya.plug(target, attr)
-                            if (any(keyed for _, keyed in target_entries) or auto_key
-                                    or Maya.key_times_for_plug(plug)):
-                                if cmds.getAttr(plug, settable=True):
-                                    cmds.setKeyframe(plug, time=(frame, frame))
-                    progress.step()
+            cmds.autoKeyframe(state=ctx["auto_key"])
         finally:
-            cmds.autoKeyframe(state=auto_key)
-            if scheduled:
-                cmds.currentTime(current_time)
-            if marker:
-                marker.delete_marker()
-        return {op.xform_target for entries in scheduled.values() for op, _ in entries} | {item[0].xform_target for item in fast}
+            cmds.currentTime(ctx["current_time"])
+            if ctx["marker"]:
+                ctx["marker"].delete_marker()
+
+    # --- coordinator ----------------------------------------------------------
+    def apply_requests(self, requests, timeline_selection, selected_range, runner=None):
+        """Plan, capture world poses, write switches, then compensate per frame.
+
+        Runs as a cooperative coordinator: on a worker thread for long jobs
+        (every Maya call marshalled to the main thread), inline for short ones.
+        """
+        runner = runner or OperationRunner()
+        self.last_range = None
+        self.issues = []
+        estimate = 0
+        for operations, all_frames in requests:
+            for operation in operations:
+                if all_frames or timeline_selection:
+                    estimate += (len(self.transform_key_times(operation.xform_target))
+                                 if operation.xform_target else 1)
+                else:
+                    estimate += 1
+
+        def coordinator(run):
+            jobs, fast = run.main(self._plan, requests, timeline_selection, selected_range)
+            if not jobs and not fast:
+                return set()
+            schedule = {}
+            for job in jobs:
+                for op in job["ops"]:
+                    target = op.xform_target
+                    if not target:
+                        continue  # no xform target: the switch is written, no pose is held
+                    for frame in job["frames"]:
+                        slot = schedule.setdefault(frame, {})
+                        slot[target] = slot.get(target, False) or job["keyed"]
+            targets = sorted({t for slot in schedule.values() for t in slot})
+            self.last_range = (min(schedule), max(schedule)) if schedule else None
+            run.set_total(len(schedule) * 2 + 1)
+
+            snapshots = {}
+            run.status = "SpaceSwitch: saving positions"
+            for frame in sorted(schedule):
+                run.check(wrote=False)
+                snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
+                run.step()
+
+            run.check(wrote=False)
+            ctx = run.main(self._begin_write, schedule, targets)
+            try:
+                run.wrote = True
+                run.main(self._write_switches, jobs, fast, self)
+                run.step("SpaceSwitch: applying positions")
+                for frame in sorted(schedule):
+                    run.check()
+                    run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
+                    run.step()
+            finally:
+                run.main(self._end_write, ctx)
+            return set(targets) | {item[0].xform_target for item in fast}
+
+        return runner.run(coordinator, estimate)
 
 
 class _ContentHeightScrollArea(QtWidgets.QScrollArea):
@@ -2867,11 +3750,20 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._geometry_fit_pending = True
         self._previous_selection = []
         self._switch_data = {}
+        self._busy = False
+        self._setup_dialog = None
 
         self._popup_timer = QTimer(self)
         self._popup_timer.setSingleShot(True)
         self._popup_timer.setInterval(100)
         self._popup_timer.timeout.connect(self._show_pending_popup)
+
+        # Coalesce bursts of Maya events (scrubbing, marquee selection) into one update.
+        self._pending_refresh = None
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(40)
+        self._refresh_timer.timeout.connect(self._run_deferred_refresh)
 
         self.settings = QSettings(DATA.get("AUTHOR", {}).get("name", "Alehaaa"), DATA.get("TOOL"))
         self._load_persistent_settings()
@@ -2896,7 +3788,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         if not self.isVisible():
             self._last_multi_modifier_state = None
             return
-        modifier_held = _multi_select_modifier_held()
+        modifier_held = (_multi_select_modifier_held(), _cycle_modifier_held())
         if modifier_held == self._last_multi_modifier_state:
             return
         self._last_multi_modifier_state = modifier_held
@@ -2908,6 +3800,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         for item, _options_map in self._active_switch_widgets.values():
             if util.is_valid_widget(item):
                 item._update_multi_checkbox_visibility()
+                item._update_cycle_hint()
 
     def _selected_multi_entries(self):
         """Return checked enum rows and their option maps in display order."""
@@ -2929,12 +3822,19 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             if selected_entries is not None
             else self._selected_multi_entries()
         ):
-            if len(item.objects_map) <= 1:
+            by_plug = OrderedDict()
+            for target, object_data in item.objects_map.items():
+                plug = (object_data.get("attr_node") or target, object_data.get("attr"))
+                by_plug.setdefault(plug, OrderedDict())[target] = object_data
+            if len(by_plug) <= 1:
                 entries.append((item, options_map))
                 continue
-            for target, object_data in item.objects_map.items():
+            for objects in by_plug.values():
+                first = next(iter(objects))
+                label_node = first if len(objects) == 1 else (
+                    next(iter(objects.values())).get("attr_node") or first)
                 staged_item = _StagedAttributeEntry(
-                    item, target, object_data
+                    item, label_node, objects
                 )
                 staged_options = self._build_options_map(
                     staged_item.objects_map
@@ -3152,6 +4052,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             self._update_attribute_scrollbar_margin
         )
         self.mainLayout.addWidget(self.attributes_scroll)
+
         self.mainLayout.addStretch(1)
 
     def _create_selection_layout(self):
@@ -3175,7 +4076,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         )
         title_icon.setAlignment(QtCore.Qt.AlignCenter)
 
-        selection_title = QtWidgets.QLabel("Selection")
+        selection_title = QtWidgets.QLabel(_t("Selection"))
+        self.selection_title = selection_title
         selection_title.setStyleSheet(
             "font-size: %spx; color: %s; font-weight: bold; background: transparent;" % (util.DPI(18), self.TEXT_COLOR)
         )
@@ -3183,14 +4085,27 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         selection_title.setWordWrap(False)
         selection_title.setFixedHeight(selection_title.fontMetrics().height() + 2)
 
+        self.view_button = QtWidgets.QPushButton(u"\u2197")
+        self.view_button.setCursor(QtCore.Qt.PointingHandCursor)
+        self.view_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.view_button.setFixedSize(util.DPI(22), util.DPI(22))
+        self.view_button.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:%s;font-size:%spx;}"
+            "QPushButton:hover{color:%s;}" % (COLOR_TEXT_SECONDARY, util.DPI(16), COLOR_ACCENT_WHITE)
+        )
+        self.view_button.setToolTip(_t("Open as a window (stays open)"))
+        self.view_button.clicked.connect(self.expand_to_window)
+
         title_layout.addWidget(title_icon)
         title_layout.addWidget(selection_title, 1)
+        title_layout.addWidget(self.view_button)
 
         self.selection_label = QtWidgets.QLabel(_t("No switches for selection"))
         self.selection_label.setStyleSheet("color: %s; background: transparent;" % self.TEXT_COLOR)
 
         selection_layout.addLayout(title_layout)
         selection_layout.addWidget(self.selection_label)
+        self._update_header()
 
         self.mainLayout.insertLayout(0, selection_layout)
 
@@ -3200,6 +4115,19 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.euler_filter = self._setting_bool("euler_filter", True)
         self.fast_rotation_order = self._setting_bool("fast_rotation_order", True)
         self.show_rotate_order = self._setting_bool("show_rotate_order", True)
+        self.asset_view = self._setting_bool("asset_view", False)
+        self._asset_namespace = None
+
+    def _custom_switch_keys(self):
+        value = self.settings.value("custom_switches", [])
+        if not value:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return [str(v) for v in value]
+
+    def _set_custom_switch_keys(self, keys):
+        self.settings.setValue("custom_switches", sorted(set(keys)))
 
     def _setting_bool(self, key, default):
         value = self.settings.value(key, default)
@@ -3230,25 +4158,31 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             self._cb.add(
                 om.MEventMessage.addEventCallback(
                     "SelectionChanged",
-                    lambda *a: self.refresh(force=True),
+                    lambda *a: self._on_selection_changed(),
                 )
             )
             self._cb.add(
                 om.MEventMessage.addEventCallback(
                     "timeChanged",
-                    lambda *a: self.refresh(force=True),
+                    lambda *a: self._on_time_changed(),
                 )
             )
             self._cb.add(
                 om.MEventMessage.addEventCallback(
                     "Undo",
-                    lambda *a: self.refresh(force=True),
+                    lambda *a: self._schedule_refresh("full"),
+                )
+            )
+            self._cb.add(
+                om.MEventMessage.addEventCallback(
+                    "Redo",
+                    lambda *a: self._schedule_refresh("full"),
                 )
             )
             self._cb.add(
                 om.MSceneMessage.addCallback(
                     om.MSceneMessage.kAfterOpen,
-                    lambda *a: self._refresh_callbacks(),
+                    lambda *a: (self.catalog_builder.clear_cache(), self._refresh_callbacks()),
                 )
             )
         except Exception as exc:
@@ -3276,8 +4210,48 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             if child.layout():
                 self._clear_layout(child.layout())
 
+    def _resume_auto_close(self):
+        # Never let the popup auto-close mid-switch or while targets are being picked.
+        if getattr(self, "_busy", False):
+            return
+        dialog = getattr(self, "_setup_dialog", None)
+        if dialog is not None and util.is_valid_widget(dialog) and dialog.isVisible():
+            return
+        FloatingWidget._resume_auto_close(self)
+
+    def _is_popup_mode(self):
+        # True/False = popup (auto-close running / briefly suspended); None = window.
+        return self._auto_close_active is not None
+
     def _refresh_footer(self):
-        self.setBottomBar(closeButton=not self._auto_close_active)
+        popup_mode = self._is_popup_mode()
+        view_button = getattr(self, "view_button", None)
+        if view_button is not None and util.is_valid_widget(view_button):
+            view_button.setVisible(popup_mode)
+        # Rebuilding the bar on every refresh flickers: only when the mode changes.
+        if getattr(self, "_footer_mode", "unset") == popup_mode and (popup_mode or self.bottomBar):
+            return
+        self._footer_mode = popup_mode
+        if popup_mode:
+            self.setBottomBar(closeButton=False)
+            return
+        self.setBottomBar(
+            [
+                base_widgets.QFlatDialogButton(
+                    "Add Switch",
+                    callback=self.add_switch_from_channel_box,
+                    icon=util.return_icon_path("add"),
+                )
+            ],
+            closeButton=True,
+            spacing=util.DPI(2),
+        )
+
+    def expand_to_window(self):
+        """Popup -> persistent window (stays open, gets the bottom bar)."""
+        self._geometry_anchor_bottom = self.frameGeometry().bottom()
+        self.showBottomBar()
+        self._request_geometry_fit()
 
     def refresh(self, force=False):
         self._popup_timer.stop()
@@ -3294,10 +4268,240 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._previous_selection = current_selection
         self._rebuild_active_widgets()
 
+    def _schedule_refresh(self, kind):
+        """kind: "values" (time change) or "full" (selection/undo); full wins."""
+        if kind == "full" or self._pending_refresh is None:
+            self._pending_refresh = kind
+        self._refresh_timer.start()
+
+    def _run_deferred_refresh(self):
+        kind, self._pending_refresh = self._pending_refresh, None
+        if not util.is_valid_widget(self) or not self.isVisible():
+            return
+        if kind == "values":
+            self._update_current_values()
+        elif kind == "full":
+            self.refresh(force=True)
+
+    def _update_current_values(self):
+        """Time changed: only the current values move, keys/targets don't."""
+        for item, _options_map in list(self._active_switch_widgets.values()):
+            if not util.is_valid_widget(item):
+                continue
+            changed = False
+            for obj, data in item.objects_map.items():
+                value = Maya.get_float(data.get("attr_node", obj), data.get("attr"), data.get("current", 0.0))
+                enum_values = data.get("enum_values")
+                if enum_values and int(round(value)) in enum_values:
+                    value = float(enum_values.index(int(round(value))))
+                if value != data.get("current"):
+                    data["current"] = value
+                    changed = True
+            if changed:
+                item.sync_current()
+
+    def _on_time_changed(self):
+        # Never touch the UI during playback; update values once it stops.
+        if cmds.play(query=True, state=True):
+            return
+        self._schedule_refresh("values")
+
+    def _on_selection_changed(self):
+        if self.asset_view and self._asset_namespace is not None:
+            selection = Maya.selection(long=False)
+            if not selection or SwitchCatalogBuilder.namespace_of(selection[0]) == self._asset_namespace:
+                self._previous_selection = selection
+                return
+        self._schedule_refresh("full")
+
+    def _target_overrides(self):
+        try:
+            value = self.settings.value("target_overrides", "") or ""
+            return json.loads(value) if value else {}
+        except Exception:
+            return {}
+
+    def _custom_names(self):
+        try:
+            value = self.settings.value("custom_names", "") or ""
+            return json.loads(value) if value else {}
+        except Exception:
+            return {}
+
+    def _set_custom_names(self, names):
+        self.settings.setValue("custom_names", json.dumps(names, sort_keys=True))
+
+    def _rename_switch(self, data):
+        objects = list(data.get("objects", {}).values())
+        if not objects:
+            return
+        key = self._override_key(objects[0])
+        names = self._custom_names()
+        current = names.get(key, data.get("long", ""))
+        name, accepted = QtWidgets.QInputDialog.getText(
+            self, _t("Rename Switch"), _t("Display name:"), text=current)
+        if not accepted:
+            return
+        name = str(name).strip()
+        if name:
+            names[key] = name
+        else:
+            names.pop(key, None)
+        self._set_custom_names(names)
+        self.refresh(force=True)
+
+    def _set_target_overrides(self, overrides):
+        self.settings.setValue("target_overrides", json.dumps(overrides, sort_keys=True))
+
+    @staticmethod
+    def _override_key(data):
+        return "%s.%s" % (SwitchCatalogBuilder.short_relative(data.get("attr_node")), data.get("attr"))
+
+    def _apply_target_overrides(self, catalog):
+        overrides = self._target_overrides()
+        custom_names = self._custom_names()
+        for data in catalog.values():
+            objects = data.get("objects", {})
+            first = next(iter(objects.values()), None)
+            if first:
+                custom_name = custom_names.get(self._override_key(first))
+                if custom_name:
+                    data["long"] = custom_name
+            if not overrides:
+                continue
+            replaced = OrderedDict()
+            for obj, obj_data in objects.items():
+                targets = overrides.get(self._override_key(obj_data))
+                if not targets:
+                    replaced[obj] = obj_data
+                    continue
+                namespace = SwitchCatalogBuilder.namespace_of(obj_data.get("attr_node"))
+                added_override = False
+                for rel in targets:
+                    full = "%s:%s" % (namespace, rel) if namespace else rel
+                    if Maya.exists(full):
+                        new_data = dict(obj_data)
+                        new_data["xform_target"] = full
+                        new_data["override"] = True
+                        new_data["missing_target"] = False
+                        replaced[full] = new_data
+                        added_override = True
+                if not added_override:
+                    replaced[obj] = obj_data
+            objects.clear()
+            objects.update(replaced)
+        return catalog
+
+    def _build_switch_data(self):
+        return self._apply_target_overrides(self._build_switch_data_raw())
+
+    def _build_switch_data_raw(self):
+        custom_keys = self._custom_switch_keys()
+        selection = self._previous_selection
+        if self.asset_view:
+            if selection:
+                self._asset_namespace = SwitchCatalogBuilder.namespace_of(selection[0])
+            if self._asset_namespace is None:
+                return {}
+            return self.catalog_builder.asset_catalog(self._asset_namespace, custom_keys)
+        if not selection:
+            return {}
+        data = self.catalog_builder.combined_catalog(selection)
+        return self.catalog_builder.merge_catalogs(
+            data, self.catalog_builder.custom_catalog(selection, custom_keys))
+
+    def _update_header(self):
+        if not util.is_valid_widget(getattr(self, "selection_title", None)):
+            return
+        if self.asset_view:
+            name = self._asset_namespace
+            title = (name.split(":")[-1] if name else _t("Scene")) if name is not None else _t("Asset")
+            self.selection_title.setText(title)
+            self.selection_label.setText(
+                _t("Select a control to pick an asset") if name is None
+                else _t("No switches found in this asset"))
+        else:
+            self.selection_title.setText(_t("Selection"))
+            self.selection_label.setText(_t("No switches for selection"))
+
+    def toggle_asset_view(self):
+        self.set_setting("asset_view", not self.asset_view)
+        self._geometry_anchor_bottom = self.frameGeometry().bottom()
+        self.refresh(force=True)
+
+    def add_switch_from_channel_box(self):
+        """Register channel-box-highlighted attributes of the selection as switches."""
+        selection = Maya.selection(long=False)
+        attrs = []
+        for flag in ("selectedMainAttributes", "selectedShapeAttributes", "selectedHistoryAttributes"):
+            attrs.extend(cmds.channelBox("mainChannelBox", query=True, **{flag: True}) or [])
+        if not selection or not attrs:
+            cmds.warning("SpaceSwitch: please check your channel selection for valid switches "
+                         "(select the control, highlight the attribute in the Channel Box).")
+            return
+        keys = self._custom_switch_keys()
+        added = []
+        for node in selection:
+            for attr in attrs:
+                if not Maya.attr_exists(node, attr):
+                    continue
+                long_attr = cmds.attributeQuery(attr, node=node, longName=True)
+                if self.catalog_builder.custom_entry(node, long_attr) is None:
+                    cmds.warning("SpaceSwitch: %s.%s can't be a switch (needs an enum, bool "
+                                 "or a numeric attribute with min/max)." % (node, long_attr))
+                    continue
+                key = "%s.%s" % (SwitchCatalogBuilder.short_relative(node), long_attr)
+                if key not in keys:
+                    keys.append(key)
+                    added.append(key)
+        if not added:
+            cmds.warning("SpaceSwitch: no new enum/numeric attributes to add.")
+            return
+        self._set_custom_switch_keys(keys)
+        self.refresh(force=True)
+
+    def _remove_custom_switch(self, data):
+        keys = set(self._custom_switch_keys())
+        for obj_data in data.get("objects", {}).values():
+            keys.discard("%s.%s" % (SwitchCatalogBuilder.short_relative(obj_data.get("attr_node")),
+                                    obj_data.get("attr")))
+        self._set_custom_switch_keys(keys)
+        self.refresh(force=True)
+
+    def _reset_target_override(self, data):
+        overrides = self._target_overrides()
+        for obj_data in data.get("objects", {}).values():
+            overrides.pop(self._override_key(obj_data), None)
+        self._set_target_overrides(overrides)
+        self.refresh(force=True)
+
+    def _on_item_context(self, sender, data):
+        objects = list(data.get("objects", {}).values())
+        is_custom = any(d.get("source") == "custom" for d in objects)
+        has_override = any(d.get("override") for d in objects)
+        if not is_custom and not has_override:
+            self._show_change_target_dialog(sender, data)
+            return
+        menu = widgets.QFlatMenu(self)
+        menu.aboutToShow.connect(self._suspend_auto_close)
+        menu.aboutToHide.connect(self._resume_auto_close)
+        menu.addAction("Xform Target Setup...", description="Pick the control(s) kept in place when switching.") \
+            .triggered.connect(lambda *a: self._show_change_target_dialog(sender, data))
+        menu.addAction("Rename Switch...", description="Set the display name saved for this rig attribute.") \
+            .triggered.connect(lambda *a: self._rename_switch(data))
+        if has_override:
+            menu.addAction("Reset Xform Target", description="Go back to the auto-detected target.") \
+                .triggered.connect(lambda *a: self._reset_target_override(data))
+        if is_custom:
+            menu.addAction("Remove Switch", description="Remove this switch from the panel.") \
+                .triggered.connect(lambda *a: self._remove_custom_switch(data))
+        Qtx.exec_menu(menu, QCursor.pos())
+
     def _rebuild_active_widgets(self):
         try:
-            self._switch_data = self.catalog_builder.combined_catalog(self._previous_selection) if self._previous_selection else {}
+            self._switch_data = self._build_switch_data()
             self._replace_attribute_content(self._switch_data)
+            self._update_header()
             self.selection_label.setVisible(not bool(self._switch_data))
         except Exception as exc:
             cmds.warning("Error rebuilding SpaceSwitch widgets: {}".format(exc))
@@ -3314,7 +4518,11 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def _create_switch_item(self, enum_name, data, target_layout=None, target_registry=None):
         target_nodes = list(data["objects"].keys())
-        display_name = self._format_object_name(target_nodes)
+        owners = {d.get("attr_node") for d in data["objects"].values()}
+        if len(target_nodes) > 1 and len(owners) == 1 and None not in owners:
+            display_name = self._format_object_name([owners.pop()])
+        else:
+            display_name = self._format_object_name(target_nodes)
 
         attr_item = AttributeItem(
             display_name,
@@ -3325,10 +4533,15 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             self,
         )
 
-        attr_item.setToolTip(self.formatXformTooltipObjects(target_nodes))
+        if any(d.get("missing_target") for d in data["objects"].values()):
+            attr_item.setToolTip(
+                "<html><b>Could not find Xform Target</b><br>Switching won't keep the pose."
+                "<br><br><b>Right-click to set it up...</b></html>")
+        else:
+            attr_item.setToolTip(self.formatXformTooltipObjects(target_nodes))
         attr_item.setContextMenuPolicy(Qt.CustomContextMenu)
         attr_item.customContextMenuRequested.connect(
-            lambda pos, sender=attr_item, item_data=data: self._show_change_target_dialog(sender, item_data)
+            lambda pos, sender=attr_item, item_data=data: self._on_item_context(sender, item_data)
         )
 
         options_map = self._build_options_map(data["objects"])
@@ -3345,6 +4558,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             xform_target = data.get("xform_target", display_object)
             attr = data.get("attr")
             source = data.get("source", "local")
+            enum_values = data.get("enum_values") or []
 
             for index, option in enumerate(data.get("enum", [])):
                 entry = options_map.setdefault(
@@ -3360,7 +4574,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                         xform_target=xform_target,
                         attr_node=attr_node,
                         attr=attr,
-                        value=index,
+                        value=enum_values[index] if index < len(enum_values) else index,
                         label=option,
                         source=source,
                     )
@@ -3396,11 +4610,25 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                 data["gimbal"] = self.analyzer.analyze(data.get("xform_target", node))
             results.append(data["gimbal"])
         orders = self.ROTATE_ORDER_OPTIONS
-        scores = [max([r[order]["percentage"] for r in results if order in r] or [0])
-                  for order in orders]
+        def mean_metric(order, metric):
+            values = [r[order][metric] for r in results if order in r]
+            return sum(values) / float(len(values)) if values else 0.0
+
+        averages = [mean_metric(order, "average") for order in orders]
+        maximums = [mean_metric(order, "maximum") for order in orders]
+        scores = [(average + maximum) / 2.0
+                  for average, maximum in zip(averages, maximums)]
         labels = self.analyzer.classify(scores)
-        return {order: {"percentage": score, "label": label}
-                for order, score, label in zip(orders, scores, labels)}
+        return {
+            order: {
+                "percentage": score,
+                "average": average,
+                "maximum": maximum,
+                "label": label,
+            }
+            for order, score, average, maximum, label
+            in zip(orders, scores, averages, maximums, labels)
+        }
 
     def _apply_multi_switch(self, staged_entries, all_frames):
         requests = [(option, item.enum_attr, options_map, all_frames)
@@ -3408,7 +4636,41 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self._close_multi_switch_dialog(clear_selection=True)
         self._apply_requests(requests)
 
+    _SKIPPED_TARGET_SETUP = set()  # (attr_node, attr) skipped for this Maya session
+
+    def _missing_target_prompt(self, requests):
+        """animBot-style: offer setup for a switch with no xform target. True = go on."""
+        for value, attr, options_map, _all in requests:
+            for op in options_map.get(value, {}).get("operations", []):
+                key = (op.attr_node, op.attr)
+                if op.xform_target is not None or key in self._SKIPPED_TARGET_SETUP:
+                    continue
+                self._suspend_auto_close()
+                try:
+                    answer = cmds.confirmDialog(
+                        title="SpaceSwitch",
+                        message="Could not find Xform Target for %s.\n\n"
+                                "Xform targets are the transforms kept in place when an attribute "
+                                "switches. Set one up now, or switch without keeping the pose?"
+                                % op.plug,
+                        button=["Setup", "Skip for this session", "Cancel"],
+                        defaultButton="Setup", cancelButton="Cancel", dismissString="Cancel")
+                finally:
+                    self._resume_auto_close()
+                if answer == "Skip for this session":
+                    self._SKIPPED_TARGET_SETUP.add(key)
+                    continue
+                if answer == "Setup":
+                    for item, item_options in self._active_switch_widgets.values():
+                        if item_options is options_map and util.is_valid_widget(item):
+                            self._show_change_target_dialog(item, {"objects": item.objects_map})
+                            break
+                return False
+        return True
+
     def _apply_requests(self, requests):
+        if not self._missing_target_prompt(requests):
+            return
         prepared = []
         targets = set()
         for value, attr, options_map, all_frames in requests:
@@ -3422,22 +4684,57 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         timeline = mel.eval('$tmp = $gPlayBackSlider')
         selected = cmds.timeControl(timeline, q=True, rangeVisible=True)
         frame_range = cmds.timeControl(timeline, q=True, rangeArray=True)
+        self._close_active_popup()
         self._remove_callbacks()
+        self._refresh_timer.stop()
+        self._pending_refresh = None
+        self._busy = True
+        self._suspend_auto_close()
+        runner = OperationRunner("SpaceSwitch")
+        cancelled = failed = None
         try:
             with UndoChunk("SpaceSwitch"):
                 with RefreshSuspended():
-                    changed = self.executor.apply_requests(prepared, selected, frame_range)
+                    changed = self.executor.apply_requests(prepared, selected, frame_range, runner)
                     if self.euler_filter and changed:
-                        self.apply_euler_filter(changed)
+                        self.apply_euler_filter(changed, self.executor.last_range)
+        except OperationCancelled as exc:
+            cancelled = exc
+        except Exception as exc:
+            failed = exc
+            traceback.print_exc()
         finally:
+            self._busy = False
             self._add_callbacks()
-            self.refresh(force=True)
+        if cancelled is not None or failed is not None:
+            if runner.wrote:
+                cmds.undo()  # never leave a half-switched shot: roll back the chunk
+            if cancelled is not None:
+                cmds.warning("SpaceSwitch: cancelled, %s" % (
+                    "partial changes were reverted." if runner.wrote else "nothing was changed."))
+            else:
+                cmds.warning("SpaceSwitch: failed (%s), %s" % (
+                    failed, "changes were reverted." if runner.wrote else "nothing was changed."))
+        issues = list(getattr(self.executor, "issues", []) or [])
+        if issues and cancelled is None and failed is None:
+            for issue in issues:
+                cmds.warning("SpaceSwitch: " + issue)
+            try:
+                cmds.inViewMessage(
+                    amg="SpaceSwitch: switched with %d warning%s (see Script Editor)"
+                        % (len(issues), "" if len(issues) == 1 else "s"),
+                    pos="midCenterTop", fade=True)
+            except Exception:
+                pass
+        self.refresh(force=True)
+        self._resume_auto_close()
 
     def _apply_attribute_switch(self, enum_value, enum_attr, options_and_objects, all_frames_override=None):
         all_frames = self.all_frames if all_frames_override is None else all_frames_override
         self._apply_requests([(enum_value, enum_attr, options_and_objects, all_frames)])
 
-    def apply_euler_filter(self, targets):
+    def apply_euler_filter(self, targets, frame_range=None):
+        """Euler-filter only what the switch touched; leave the rest of the shot alone."""
         curves = []
 
         for target in targets:
@@ -3452,8 +4749,16 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
         curves = sorted(set(curves))
 
-        if curves:
-            cmds.filterCurve(*curves)
+        if not curves:
+            return
+        if frame_range:
+            try:
+                cmds.filterCurve(*curves, filter="euler",
+                                 startTime=frame_range[0], endTime=frame_range[1])
+                return
+            except TypeError:
+                pass  # older Maya without a ranged filterCurve: whole curves
+        cmds.filterCurve(*curves)
 
     def apply_active_changes(self):
         self._apply_requests([(item.currentText(), attr, options, self.all_frames)
@@ -3507,7 +4812,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         FloatingWidget.enterEvent(self, event)
 
     def leaveEvent(self, event):
-        QTimer.singleShot(150, lambda: self._update_interaction_state(False))
+        QTimer.singleShot(150, lambda: util.is_valid_widget(self) and self._update_interaction_state(False))
         FloatingWidget.leaveEvent(self, event)
 
     def _handle_attr_hover(self, item):
@@ -3577,18 +4882,33 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
     def _show_change_target_dialog(self, sender, data):
         selection = Maya.selection(long=False)
+        self._close_active_popup()
 
         def on_close(objects):
+            self._setup_dialog = None
+            if objects is None:  # skipped / unchanged
+                cmds.select(selection, replace=True)
+                self._add_callbacks()
+                return
+            overrides = self._target_overrides()
+            for obj_data in data["objects"].values():
+                overrides[self._override_key(obj_data)] = [
+                    SwitchCatalogBuilder.short_relative(o) for o in objects]
+            self._set_target_overrides(overrides)
             cmds.select(selection, replace=True)
             self._add_callbacks()
-            sender.setToolTip(self.formatXformTooltipObjects(objects))
+            if util.is_valid_widget(sender):
+                sender.setToolTip(self.formatXformTooltipObjects(objects))
             for key, (item, _) in list(self._active_switch_widgets.items()):
                 if item is sender:
                     self._active_switch_widgets[key] = (item, self._build_options_map(data["objects"]))
 
         self._remove_callbacks()
 
-        dialog = SetupTargetsDialog(self, data["objects"], on_close=on_close)
+        label = sender.label_text if util.is_valid_widget(sender) else ""
+        dialog = SetupTargetsDialog(self, data["objects"], on_close=on_close, switch_label=label)
+        self._setup_dialog = dialog
+        dialog.place_near_cursor()
         dialog.show()
 
     def _show_context_menu(self, pos):
@@ -3602,6 +4922,14 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         )
         namespace_action.setCheckable(True)
         namespace_action.setChecked(self.namespace_display)
+
+        asset_action = self.context_menu.addAction(
+            "Asset View",
+            description="List every switch of the selected asset instead of just the selection.",
+        )
+        asset_action.setCheckable(True)
+        asset_action.setChecked(self.asset_view)
+        asset_action.toggled.connect(lambda *a: self.toggle_asset_view())
 
         rotate_action = self.context_menu.addAction(
             "Enable Rotate Order",
@@ -3650,7 +4978,12 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
             widgets.QAboutDialog.dlg_instance.finished.connect(lambda *args: self._resume_auto_close())
 
     def closeEvent(self, event):
+        # Close the target setup first: it owns a Maya callback and re-adds ours.
+        dialog = self._setup_dialog
+        if dialog is not None and util.is_valid_widget(dialog):
+            dialog.cancel()
         self._modifier_timer.stop()
+        self._refresh_timer.stop()
         self._popup_timer.stop()
         self._close_multi_switch_dialog(clear_selection=True)
         self._close_active_popup()
