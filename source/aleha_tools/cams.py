@@ -160,6 +160,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         self.current_layout = cmds.workspaceLayoutManager(q=1, current=True)
         self.settings_window = None
+        self.tool_hub_window = None
         self.options = None
         self.shelf_painter = None
 
@@ -700,6 +701,11 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
             "Refresh Cameras",
             description="Forcefully refresh the camera list, useful if outside changes aren't reflecting.",
         )
+        self.tool_hub_action = menu_general.addAction(
+            QIcon(util.return_icon_path("cams.svg")),
+            "Tool Hub...",
+            description="Open camera rigs, animation tools and settings in one panel.",
+        )
 
         menu_general.addSeparator()
 
@@ -757,6 +763,12 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.menu_presets = widgets.QFlatOpenMenu("HUD Presets", menu_tools)
         menu_tools.addMenu(self.menu_presets, description="Manage, customize, and apply Heads Up Display (HUD) overlays on your viewport.")
         self.menu_presets.setTearOffEnabled(True)
+
+        self.hud_editor_action = menu_tools.addAction(
+            QIcon(util.return_icon_path("attributes")),
+            "HUD Editor",
+            description="Edit the layout and contents of Maya viewport HUDs.",
+        )
 
         self.add_presets()
         self.menu_presets.aboutToShow.connect(self.add_presets)
@@ -897,6 +909,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.dock_ui_btn.clicked.connect(self.dock_to_ui)
 
         self.settings_btn.triggered.connect(self.settings)
+        self.tool_hub_action.triggered.connect(self.show_tool_hub)
         self.reload_btn.triggered.connect(self.reload_cams_UI)
         self.close_btn.triggered.connect(partial(funcs.close_UI, self))
 
@@ -906,6 +919,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         self.aimCam.triggered.connect(partial(self._run_tools, "aimCam"))
         self.multicams.triggered.connect(partial(self._run_tools, "multicams"))
         self.spaceswitch.triggered.connect(self._run_spaceswitch)
+        self.hud_editor_action.triggered.connect(partial(funcs.run_tools, "HUDWindow", self))
 
         self.reset_cams_data.triggered.connect(lambda: self.process_prefs(reset=True))
         self.updates.triggered.connect(partial(funcs.check_for_updates, self))
@@ -917,6 +931,18 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
         funcs.run_tools(tool)
 
         self.reload_cams_UI()
+
+    def show_tool_hub(self):
+        dialog = self.tool_hub_window
+        if dialog is None or not util.is_valid_widget(dialog):
+            actions = {key: getattr(self, key) for key in
+                       ("followCam", "aimCam", "multicams", "spaceswitch",
+                        "hud_editor_action", "settings_btn", "reload_btn")}
+            dialog = widgets.QToolHubDialog(actions, parent=self)
+            self.tool_hub_window = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _run_spaceswitch(self):
         try:
@@ -1136,7 +1162,11 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         self.menu_presets.clear()
 
-        presets_ac_group = QActionGroup(self)
+        previous_group = getattr(self, "hud_presets_action_group", None)
+        if previous_group is not None:
+            previous_group.deleteLater()
+        presets_ac_group = QActionGroup(self.menu_presets)
+        self.hud_presets_action_group = presets_ac_group
         if self.hud_settings:
             self.menu_presets.addSeparator().setText("Presets")
 
@@ -1160,10 +1190,7 @@ class QCamsWindow(MayaQWidgetDockableMixin, QDialog):
 
         self.menu_presets.addSeparator()
 
-        self.hud_editor = self.menu_presets.addAction(
-            "HUD Editor", description="Manage, customize, and apply Heads Up Display (HUD) overlays on your viewport."
-        )
-        self.hud_editor.triggered.connect(partial(funcs.run_tools, "HUDWindow", self))
+        self.menu_presets.addAction(self.hud_editor_action)
 
     def hud_preset_triggered(self, hud_index, preset):
         self.hud_settings["selected"] = hud_index

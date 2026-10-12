@@ -3445,6 +3445,12 @@ class SwitchExecutor(object):
             if before:
                 guards.add(max(before))
         for frame in frames:
+            following_switches = [t for t in switch_times if t > frame]
+            if following_switches:
+                # Existing switch boundaries take precedence over transform
+                # samples introduced by earlier trajectory compensation.
+                guards.add(min(following_switches))
+                continue
             index = bisect.bisect_right(ordered, frame)
             if index < len(ordered) and ordered[index] not in frames:
                 guards.add(ordered[index])
@@ -3569,9 +3575,70 @@ class SwitchExecutor(object):
                     value = self._value_at(operation.plug, frame)
                     if value is not None and abs(value - target_value) > self.EPSILON:
                         guards[frame] = value
+                if timeline_selection:
+                    # A selected timeline range is half-open. Restore the old
+                    # space at its end rather than holding the new space to
+                    # the next distant transform key outside the selection.
+                    boundary = float(selected_range[1])
+                    if boundary > max(frames):
+                        value = self._value_at(operation.plug, boundary)
+                        if value is not None and abs(value - target_value) > self.EPSILON:
+                            guards[boundary] = value
             jobs.append({"op": operation, "ops": ops, "frames": frames,
-                         "keyed": keyed, "guards": guards})
+                         "keyed": keyed, "guards": guards,
+                         "all_frames": all_frames})
         return jobs, fast
+
+    def _trajectory_frames(self, job, timeline_selection, selected_range):
+        """Samples needed to keep interpolated motion when a space key is inserted.
+
+        Inserting a compensated transform key changes the splines on both sides
+        of that key, including frames whose switch attribute has not changed.
+        Sample the enclosing animated segment at actual frame intervals, and
+        restore the range boundary when the user selected a timeline section.
+        """
+        frames = set(job["frames"])
+        if not job["keyed"] or not any(op.xform_target for op in job["ops"]):
+            return frames
+        key_times = set(job["guards"])
+        key_times.update(Maya.key_times_for_plug(job["op"].plug))
+        for op in job["ops"]:
+            if op.xform_target:
+                key_times.update(self.transform_key_times(op.xform_target))
+        if not key_times:
+            return frames
+        if timeline_selection:
+            boundary_start = float(selected_range[0])
+            boundary_end = float(selected_range[1])
+            previous = [t for t in key_times if t < boundary_start]
+            following = [t for t in key_times if t > boundary_end]
+            # New keys at the selected range's edges affect the interpolation
+            # of its enclosing splines. Protect their whole neighbouring
+            # segments, including samples outside the selected time slider.
+            first = max(previous) if previous else boundary_start - 1.0
+            last = min(following) if following else boundary_end
+        elif job["all_frames"]:
+            first, last = min(frames | key_times), max(frames | key_times)
+        else:
+            low, high = min(frames), max(frames)
+            previous = [t for t in key_times if t < low]
+            following = [t for t in key_times if t > high]
+            first = max(previous) if previous else low
+            last = min(following) if following else high
+        frames.update(t for t in key_times if first <= t <= last)
+        # Quarter-frame sampling also bounds spline/tangent deviations between
+        # integer frames; a fixed budget prevents long shots from stalling UI.
+        span = max(0.0, last - first)
+        interval = max(0.25, math.ceil(span / 120.0) * 0.25)
+        if interval > 0.25:
+            self.issues.append("Trajectory sampled every %g frames over %s-%s"
+                               % (interval, first, last))
+        current = math.ceil(first / interval) * interval
+        while current <= last:
+            frames.add(float(current))
+            current += interval
+        frames.update((float(first), float(last)))
+        return frames
 
     # --- writing (main thread, one call per step) ------------------------------
     @staticmethod
@@ -3748,9 +3815,13 @@ class SwitchExecutor(object):
         estimate = 0
         for operations, all_frames in requests:
             for operation in operations:
-                if all_frames or timeline_selection:
-                    estimate += (len(self.transform_key_times(operation.xform_target))
-                                 if operation.xform_target else 1)
+                times = self.transform_key_times(operation.xform_target)
+                if times:
+                    # The actual work includes trajectory samples between
+                    # authored keys, even for a current-frame switch. Select
+                    # the event-loop runner before entering the coordinator.
+                    span = max(times) - min(times)
+                    estimate += min(480, max(1, int(span * 2.0) + 1))
                 else:
                     estimate += 1
 
@@ -3760,11 +3831,13 @@ class SwitchExecutor(object):
                 return set()
             schedule = {}
             for job in jobs:
+                sample_frames = run.main(self._trajectory_frames, job, timeline_selection,
+                                         selected_range)
                 for op in job["ops"]:
                     target = op.xform_target
                     if not target:
                         continue  # no xform target: the switch is written, no pose is held
-                    for frame in job["frames"]:
+                    for frame in sample_frames:
                         slot = schedule.setdefault(frame, {})
                         slot[target] = slot.get(target, False) or job["keyed"]
             targets = sorted({t for slot in schedule.values() for t in slot})

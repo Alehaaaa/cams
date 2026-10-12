@@ -59,6 +59,107 @@ class SpaceSwitchTests(unittest.TestCase):
         entry = builder.custom_entry(node, "space")[0][2].to_dict()
         self.assertEqual(entry["enum_values"], [0, 3, 4])
 
+    def test_current_frame_switch_preserves_intermediate_world_trajectory(self):
+        offset = cmds.createNode("transform", name="trajectory_offset")
+        control = self._enum_control("trajectory_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="trajectory_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 10)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=2)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=8)
+        cmds.keyTangent(control + ".translateX", edit=True,
+                        time=(1, 10), inTangentType="spline", outTangentType="spline")
+        cmds.currentTime(5)
+        samples = [1 + i * 0.25 for i in range(37)]
+        before = {frame: cmds.getAttr(control + ".worldMatrix[0]", time=frame)
+                  for frame in samples}
+        with spaceswitch.UndoChunk("TrajectorySwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        self.assertEqual(cmds.getAttr(control + ".space", time=4), 0)
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 1)
+        self.assertEqual(cmds.getAttr(control + ".space", time=10), 0)
+        for frame in samples:
+            actual = cmds.getAttr(control + ".worldMatrix[0]", time=frame)
+            self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(before[frame], actual)),
+                            "World trajectory changed at frame %s: %s -> %s"
+                            % (frame, before[frame], actual))
+        cmds.undo()
+        for frame in samples:
+            self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+                before[frame], cmds.getAttr(control + ".worldMatrix[0]", time=frame))))
+
+    def test_timeline_range_preserves_motion_outside_selected_interval(self):
+        offset = cmds.createNode("transform", name="range_motion_offset")
+        control = self._enum_control("range_motion_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="range_motion_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 11)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=1)
+        cmds.setKeyframe(control, attribute="translateX", time=5, value=8)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=3)
+        samples = range(1, 11)
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t) for t in samples}
+        cmds.currentTime(5)
+        with spaceswitch.UndoChunk("RangeMotionSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                True, [4, 8])
+        self.assertEqual(cmds.getAttr(control + ".space", time=3), 0)
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 1)
+        self.assertEqual(cmds.getAttr(control + ".space", time=8), 0)
+        for t in samples:
+            self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(
+                before[t], cmds.getAttr(control + ".worldMatrix[0]", time=t))),
+                "Selected-range world trajectory changed at %s" % t)
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
+
+    def test_layered_translation_trajectory_and_base_curve_ownership(self):
+        offset = cmds.createNode("transform", name="trajectory_layer_offset")
+        control = self._enum_control("trajectory_layer_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="trajectory_layer_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 12)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=1)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=7)
+        cmds.select(control)
+        layer = cmds.animLayer("TrajectoryLayer")
+        cmds.animLayer(layer, edit=True, addSelectedObjects=True)
+        cmds.animLayer(layer, edit=True, selected=True, preferred=True)
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=4, animLayer=layer)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=9, animLayer=layer)
+        root = cmds.animLayer(q=True, root=True)
+        base_curve = cmds.animLayer(root, q=True,
+                                    findCurveForPlug=control + ".translateX")[0]
+        layer_curve = cmds.animLayer(layer, q=True,
+                                     findCurveForPlug=control + ".translateX")[0]
+        original_base = cmds.keyframe(base_curve, q=True, valueChange=True)
+        samples = range(1, 11)
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t) for t in samples}
+        cmds.currentTime(5)
+        with spaceswitch.UndoChunk("LayeredTrajectory"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        self.assertEqual(cmds.keyframe(base_curve, q=True, valueChange=True),
+                         original_base)
+        self.assertIn(6, cmds.keyframe(layer_curve, q=True, timeChange=True))
+        for t in samples:
+            self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(
+                before[t], cmds.getAttr(control + ".worldMatrix[0]", time=t))),
+                "Layered world trajectory changed at %s" % t)
+
     def test_animation_layer_space_switch_preserves_pose_and_layer_keys(self):
         offset = cmds.createNode("transform", name="layer_offset")
         control = self._enum_control("layer_ctrl", "World:Offset")
@@ -540,7 +641,8 @@ class SpaceSwitchTests(unittest.TestCase):
         class CancelAfterFirstCompensation(spaceswitch.OperationRunner):
             def step(self, status=None):
                 result = super(CancelAfterFirstCompensation, self).step(status)
-                if self.done >= 5:  # 3 captures, 1 switch write, 1 matched frame
+                if self.done >= (self.total - 1) // 2 + 2:
+                    # All sampled captures, switch write, one compensated frame.
                     self.cancel()
                 return result
 

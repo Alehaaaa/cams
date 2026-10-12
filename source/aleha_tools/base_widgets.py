@@ -108,6 +108,19 @@ class QFlatDialogButton(dict):
         return not self.__eq__(other)
 
 
+class QFlatSectionHeader(QLabel):
+    """Compact, borderless section title shared by the camera dialogs."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("CamsSectionHeader")
+        self.setStyleSheet(
+            "QLabel#CamsSectionHeader { color: #bacad5; font-weight: 600;"
+            " font-size: %spx; padding-top: %spx; padding-bottom: %spx; }"
+            % (DPI(11), DPI(7), DPI(2))
+        )
+
+
 class QFlatHoverableIcon:
     HIGHLIGHT_HEX = "#282828"
 

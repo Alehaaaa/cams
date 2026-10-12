@@ -131,6 +131,8 @@ from .base_widgets import (
     QFlatDialog,
     QFlatConfirmDialog,
     QFlatTooltipManager,
+    QFlatSectionHeader,
+    QFlatButton,
 )
 from . import DATA
 
@@ -290,6 +292,71 @@ class QFlatPushButton(TooltipMixin, QPushButton):
     def mousePressEvent(self, event):
         QFlatTooltipManager.hide()
         QPushButton.mousePressEvent(self, event)
+
+
+class QToolHubDialog(QFlatDialog):
+    """One consistent launcher for the tools available from the Cams shelf.
+
+    Each button triggers its existing QAction, so the hub shares exactly the
+    same execution, callbacks and lifecycle as the native Cams menus.
+    """
+
+    SECTIONS = (
+        ("Camera Rigs", (
+            ("followCam", "Follow Cam", "Camera that follows an animated object."),
+            ("aimCam", "Aim Cam", "Camera controlled by an aim target."),
+            ("multicams", "MultiCams", "Create and manage multiple camera shots."),
+        )),
+        ("Animation", (
+            ("spaceswitch", "Space Switcher", "Change rig spaces while keeping poses."),
+        )),
+        ("Viewport", (
+            ("hud_editor_action", "HUD Editor", "Arrange viewport text overlays and HUD presets."),
+        )),
+        ("Cams Settings", (
+            ("settings_btn", "Default Attributes", "Camera defaults and viewport display."),
+            ("reload_btn", "Refresh Cameras", "Synchronize the camera shelf with Maya."),
+        )),
+    )
+
+    def __init__(self, actions, parent=None):
+        super().__init__(parent=parent)
+        self.setWindowTitle("Cams Tool Hub")
+        self.setMinimumWidth(DPI(340))
+        self.tool_buttons = {}
+        self._tool_actions = {}
+        layout = QVBoxLayout()
+        layout.setContentsMargins(DPI(16), DPI(12), DPI(16), DPI(12))
+        layout.setSpacing(DPI(6))
+        for title, tools in self.SECTIONS:
+            available = [(key, label, help_text, actions[key])
+                         for key, label, help_text in tools if key in actions]
+            if not available:
+                continue
+            layout.addWidget(QFlatSectionHeader(title, self))
+            for key, label, help_text, action in available:
+                button = QFlatButton(label, background="#424a52", parent=self)
+                button.setIcon(action.icon())
+                button.setToolTip(help_text)
+                button.setEnabled(action.isEnabled())
+                button.clicked.connect(lambda checked=False, target=action: target.trigger())
+                action.changed.connect(lambda target=action, control=button: self._sync_tool_action(target, control))
+                layout.addWidget(button)
+                self.tool_buttons[key] = button
+                self._tool_actions[key] = action
+        self.root_layout.addLayout(layout)
+        self.setBottomBar(closeButton=True)
+
+    @staticmethod
+    def _sync_tool_action(action, button):
+        """Keep launchers consistent with the existing Maya menu actions."""
+        button.setEnabled(action.isEnabled() and action.isVisible())
+        button.setIcon(action.icon())
+
+    def showEvent(self, event):
+        for key, action in self._tool_actions.items():
+            self._sync_tool_action(action, self.tool_buttons[key])
+        super().showEvent(event)
 
 
 # QLineEdit that doesn't trigger next action
@@ -1255,11 +1322,12 @@ class QAttributesDialog(QFlatDialog):
         self.color_slider_and_picker.addStretch()
         self.color_slider_and_picker.addWidget(self.color_lock)
 
+        self.form_layout.addRow(QFlatSectionHeader("Lens"))
         self.form_layout.addRow("Focal Length:", self.focal_length_container)
-        self.form_layout.addRow(QFrame(frameShape=QFrame.HLine))
+        self.form_layout.addRow(QFlatSectionHeader("Clipping"))
         self.form_layout.addRow("Near Clip Plane:", self.near_clip_plane_container)
         self.form_layout.addRow("Far Clip Plane:", self.far_clip_plane_container)
-        self.form_layout.addRow(QFrame(frameShape=QFrame.HLine))
+        self.form_layout.addRow(QFlatSectionHeader("Viewport Display"))
         self.form_layout.addRow("Overscan:", self.overscan_container)
         self.form_layout.addRow("Gate Mask Opacity:", self.opacity_container)
         self.form_layout.addRow("Gate Mask Color:", self.color_slider_and_picker)
@@ -1288,12 +1356,12 @@ class QAttributesDialog(QFlatDialog):
                 "lock": self.far_clip_lock,
             },
             {
-                "target": [self.gate_mask_opacity_value, self.gate_mask_color_slider],
+                "target": [self.gate_mask_opacity_value, self.gate_mask_opacity_slider],
                 "attr": ".displayGateMaskOpacity",
                 "lock": self.opacity_lock,
             },
             {
-                "target": [self.gate_mask_color_picker, self.gate_mask_opacity_slider],
+                "target": [self.gate_mask_color_picker, self.gate_mask_color_slider],
                 "attr": ".displayGateMaskColor",
                 "lock": self.color_lock,
             },
@@ -1477,10 +1545,13 @@ class QSettingsDialog(QFlatDialog):
         self.root_layout.addLayout(self.main_layout)
 
     def create_widgets(self):
-        if get_python_version() < 3:
-            onlyFloat = QRegExpValidator(QRegExp(r"[0-9].+"))
-        else:
-            onlyFloat = QRegularExpressionValidator(QRegularExpression(r"[0-9].+"))  # type: ignore
+        # The old regex rejected a single digit such as "1", accepted some
+        # nonnumeric strings and allowed an empty field to reach float() on OK.
+        # Use semantic numeric ranges for the camera attributes instead.
+        def float_validator(low, high):
+            validator = QDoubleValidator(low, high, 6, self)
+            validator.setNotation(QDoubleValidator.StandardNotation)
+            return validator
 
         description_label = QLabel("Mark the default attributes you want to be saved.")
         description_label.setAlignment(Qt.AlignCenter)
@@ -1538,10 +1609,10 @@ class QSettingsDialog(QFlatDialog):
         color_slider_and_picker.addWidget(self.gate_mask_color_picker)
         color_slider_and_picker.addWidget(self.gate_mask_color_slider)
 
-        self.near_clip_plane.setValidator(onlyFloat)
-        self.far_clip_plane.setValidator(onlyFloat)
-        self.overscan_value.setValidator(onlyFloat)
-        self.gate_mask_opacity_value.setValidator(onlyFloat)
+        self.near_clip_plane.setValidator(float_validator(0.000001, 1000000.0))
+        self.far_clip_plane.setValidator(float_validator(0.000001, 1000000000.0))
+        self.overscan_value.setValidator(float_validator(1.0, 2.0))
+        self.gate_mask_opacity_value.setValidator(float_validator(0.0, 1.0))
 
         self.near_clip_plane.setFixedWidth(DPI(80))
         self.far_clip_plane.setFixedWidth(DPI(80))
@@ -1557,11 +1628,11 @@ class QSettingsDialog(QFlatDialog):
         }
 
         self.main_layout.addRow(description_label)
-        self.main_layout.addRow(QFrame(frameShape=QFrame.HLine))
+        self.main_layout.addRow(QFlatSectionHeader("Clipping"))
         # Loop through each key-value pair in the dictionary and add it to the layout with a checkbox
         for index, (key, value) in enumerate(layout_dict.items()):
             if index == 2:
-                self.main_layout.addRow(QFrame(frameShape=QFrame.HLine))
+                self.main_layout.addRow(QFlatSectionHeader("Viewport Display"))
 
             widget_container = QHBoxLayout()
             widget_container.setSpacing(DPI(5))
@@ -1641,6 +1712,13 @@ class QSettingsDialog(QFlatDialog):
             self.gate_mask_color_slider.setValue(v)
 
     def apply_settings(self, close=False):
+        for field in (self.near_clip_plane, self.far_clip_plane,
+                      self.overscan_value, self.gate_mask_opacity_value):
+            if not field.hasAcceptableInput():
+                field.setFocus()
+                field.selectAll()
+                field.setToolTip("Enter a valid number in the allowed range.")
+                return False
         near = float(self.near_clip_plane.text()), self.near_clip_plane.isEnabled()
         far = float(self.far_clip_plane.text()), self.far_clip_plane.isEnabled()
         overscan = float(self.overscan_value.text()), self.overscan_value.isEnabled()
@@ -1665,6 +1743,7 @@ class QSettingsDialog(QFlatDialog):
             self._parentUI.default_cam_btn.setText(self._parentUI.default_cam[0])
         if close:
             self.close()
+        return True
 
 
 # ABOUT DIALOG #############################################################

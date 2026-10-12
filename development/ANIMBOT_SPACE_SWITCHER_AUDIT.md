@@ -68,21 +68,26 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
   animBot's exact failure handling for constraints/locked rig channels, callback
   lifecycle inside Maya's full graphical shell, and commercial plugin-specific
   persistence formats. Maya standalone tests do not simulate every production rig
-  or Graph Editor interaction. A Maya probe also found a concrete residual
-  limitation: on sparse current-frame switches, altering a compensated curve
-  key at frame 5 can change the interpolated world pose at frame 4 even when
-  the original key poses at frames 1 and 10 remain fixed. A dense/in-between
-  compensation mode or shape-preserving discontinuity handling requires a
-  separate algorithm; the current key-sample guarantee does not imply
-  continuous-time preservation between those samples.
+  or Graph Editor interaction. The sparse-key defect was reproduced by a
+  frame-5 switch with authored transform keys at frames 1 and 10: world pose
+  at frame 4 could drift despite matching authored poses. Camstool now captures
+  the pre-switch trajectory over the enclosing authored-key span and bakes
+  compensated T/R/S at quarter-frame intervals (coarsened for spans over 120
+  frames, with a warning). For selected ranges it also captures the nearest
+  external authored-key boundaries and restores the previous switch state at
+  the range exit. The test checks every quarter frame from 1 to 10, rather
+  than only original key frames. This is Camstool's tested algorithm, not a
+  recovered animBot algorithm. Exact world-space motion between its sample
+  points, original curve topology/tangents, and nontrivial evaluation cycles
+  are not mathematically guaranteed; densely baked curves can be expensive.
 
 ## Verification scope (Maya 2024)
 
-The expanded `tests/test_spaceswitch_maya.py` suite exercises 32 independent
-scenarios, including the six new complex-rig/layer/write-failure cases above
-and native Qt mouse interaction. These are scene-level observations. The
-failed intermediate-frame probe is recorded as a limitation rather than
-misrepresented as a passing regression. The reference branch above also
+The expanded `tests/test_spaceswitch_maya.py` suite exercises 35 independent
+scenarios, including real intermediate trajectory samples, a selected range
+with unchanged world samples outside its boundary, active animation-layer
+translation with original base keys retained, and native Qt mouse interaction.
+The reference branch above also
 includes cleanup on cancellation at offsets 1966–2174, but its exact
 exception-safety guarantees remain obscured by called wrappers; Camstool's
 transaction is verified independently through undo of rejected keys and
