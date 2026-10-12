@@ -23,16 +23,10 @@ from aleha_tools import spaceswitch
 
 class _Owner(object):
     fast_rotation_order = False
-    allow_subframe_compensation = True
 
 
 class _FastOwner(object):
     fast_rotation_order = True
-    allow_subframe_compensation = True
-
-
-class _OriginalKeysOwner(_Owner):
-    allow_subframe_compensation = False
 
 
 class SpaceSwitchTests(unittest.TestCase):
@@ -98,16 +92,67 @@ class SpaceSwitchTests(unittest.TestCase):
         dialog.close()
         parent.close()
 
-    def test_original_key_mode_is_default_and_high_fidelity_opt_in_persists(self):
+    def test_no_baking_mode_is_exposed_in_ui(self):
         parent = QtWidgets.QWidget()
         first = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
-        self.assertFalse(first.allow_subframe_compensation)
-        first.set_setting("allow_subframe_compensation", True)
+        self.assertFalse(hasattr(first, "allow_subframe_compensation"))
         first.close()
         second = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
-        self.assertTrue(second.allow_subframe_compensation)
+        self.assertFalse(hasattr(second, "allow_subframe_compensation"))
         second.close()
         parent.close()
+
+    def test_two_phase_switch_captures_then_compensates_only_control_keys(self):
+        offset = cmds.createNode("transform", name="two_pass_offset")
+        control = cmds.parent(self._enum_control("two_pass_ctrl", "World:Offset"), offset)[0]
+        condition = cmds.createNode("condition", name="two_pass_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 5)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        for time, value in ((1, 2), (10, 8)):
+            cmds.setKeyframe(control + ".translateX", time=time, value=value)
+        cmds.currentTime(5)
+        executor = spaceswitch.SwitchExecutor(_Owner())
+        events = []
+        original_capture = executor._capture
+        original_apply = executor._compensate_frame
+
+        def capture(frame, targets):
+            events.append(("save", frame))
+            return original_capture(frame, targets)
+
+        def compensate(frame, targets, snapshot, ctx):
+            events.append(("apply", frame))
+            return original_apply(frame, targets, snapshot, ctx)
+
+        with mock.patch.object(executor, "_capture", side_effect=capture), \
+             mock.patch.object(executor, "_compensate_frame", side_effect=compensate):
+            with spaceswitch.UndoChunk("TwoPhaseSpace"):
+                executor.apply_requests(
+                    [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                    False, [5, 5])
+        self.assertEqual(events, [("save", 1.0), ("save", 5.0), ("save", 10.0),
+                                  ("apply", 1.0), ("apply", 5.0), ("apply", 10.0)])
+        self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
+                                           timeChange=True)), {1, 5, 10})
+
+    def test_fast_rotate_order_skips_world_capture_and_compensation(self):
+        control = cmds.createNode("transform", name="fast_rotate_ctrl")
+        for time, angle in ((1, 15), (10, 70)):
+            cmds.setKeyframe(control + ".rotateX", time=time, value=angle)
+            cmds.setKeyframe(control + ".rotateY", time=time, value=angle / 2.0)
+            cmds.setKeyframe(control + ".rotateZ", time=time, value=angle / 3.0)
+        executor = spaceswitch.SwitchExecutor(_FastOwner())
+        with mock.patch.object(executor, "_capture", side_effect=AssertionError("frame capture")), \
+             mock.patch.object(executor, "_begin_write", side_effect=AssertionError("frame pass")):
+            with spaceswitch.UndoChunk("FastRotateOrder"):
+                executor.apply_requests(
+                    [([spaceswitch.SwitchOperation(control, control, "rotateOrder", 5)], True)],
+                    False, [5, 5])
+        self.assertEqual(cmds.getAttr(control + ".rotateOrder"), 5)
+        self.assertEqual(cmds.keyframe(control + ".rotateX", q=True,
+                                       timeChange=True), [1.0, 10.0])
 
     @staticmethod
     def _enum_control(name="ctrl", enum_name="World:Chest=3:Head"):
@@ -123,7 +168,7 @@ class SpaceSwitchTests(unittest.TestCase):
         entry = builder.custom_entry(node, "space")[0][2].to_dict()
         self.assertEqual(entry["enum_values"], [0, 3, 4])
 
-    def test_current_frame_switch_preserves_intermediate_world_trajectory(self):
+    def test_current_frame_switch_preserves_keyed_poses_and_undo(self):
         offset = cmds.createNode("transform", name="trajectory_offset")
         control = self._enum_control("trajectory_ctrl", "World:Offset")
         control = cmds.parent(control, offset)[0]
@@ -147,7 +192,7 @@ class SpaceSwitchTests(unittest.TestCase):
         self.assertEqual(cmds.getAttr(control + ".space", time=4), 0)
         self.assertEqual(cmds.getAttr(control + ".space", time=5), 1)
         self.assertEqual(cmds.getAttr(control + ".space", time=10), 0)
-        for frame in samples:
+        for frame in (1, 5, 10):
             actual = cmds.getAttr(control + ".worldMatrix[0]", time=frame)
             self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(before[frame], actual)),
                             "World trajectory changed at frame %s: %s -> %s"
@@ -157,7 +202,7 @@ class SpaceSwitchTests(unittest.TestCase):
             self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
                 before[frame], cmds.getAttr(control + ".worldMatrix[0]", time=frame))))
 
-    def test_subframe_probe_detects_curve_shape_error_between_baked_keys(self):
+    def test_no_subframe_bake_keeps_curve_keys_at_authored_frames(self):
         offset = cmds.createNode("transform", name="subframe_offset")
         control = self._enum_control("subframe_ctrl", "World:Offset")
         control = cmds.parent(control, offset)[0]
@@ -179,9 +224,11 @@ class SpaceSwitchTests(unittest.TestCase):
                 False, [5, 5])
         error = max(abs(before[t][12] - cmds.getAttr(control + ".worldMatrix[0]", time=t)[12])
                     for t in samples)
-        self.assertLess(error, 0.001, "Unexpected subframe world trajectory error: %g" % error)
+        self.assertGreater(error, 0.01, "Expected spline interpolation difference")
+        self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
+                                           timeChange=True)), {1, 5, 10})
 
-    def test_adaptive_compensation_with_flat_and_linear_tangents_and_undo(self):
+    def test_mixed_tangents_compensate_at_keys_without_subframe_baking(self):
         offset = cmds.createNode("transform", name="weighted_offset")
         control = self._enum_control("weighted_ctrl", "World:Offset")
         control = cmds.parent(control, offset)[0]
@@ -204,12 +251,14 @@ class SpaceSwitchTests(unittest.TestCase):
             spaceswitch.SwitchExecutor(_Owner()).apply_requests(
                 [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
                 False, [5, 5])
-        self.assertLess(max(abs(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - expected[t])
-                            for t in sample_times), 0.002)
+        self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]", time=5)[12],
+                               expected[5], places=4)
+        self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
+                                           timeChange=True)), {1, 5, 10})
         cmds.undo()
         self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
 
-    def test_constant_offset_switch_keeps_sparse_keys_and_dense_world_motion(self):
+    def test_constant_offset_switch_keeps_only_authored_and_switch_keys(self):
         offset = cmds.createNode("transform", name="sparse_offset")
         control = cmds.parent(self._enum_control("sparse_ctrl", "World:Offset"), offset)[0]
         condition = cmds.createNode("condition", name="sparse_condition")
@@ -225,18 +274,20 @@ class SpaceSwitchTests(unittest.TestCase):
                   for t in [1 + i / 16.0 for i in range(145)]}
         cmds.currentTime(5)
         with spaceswitch.UndoChunk("SparseTrajectory"):
-            spaceswitch.SwitchExecutor(_OriginalKeysOwner()).apply_requests(
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
                 [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
                 False, [5, 5])
         keys = cmds.keyframe(control + ".translateX", query=True, timeChange=True) or []
         self.assertLessEqual(len(keys), 12, "Space switch baked too many subframe keys")
-        self.assertLess(max(abs(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - value)
-                            for t, value in before.items()), 0.002)
+        self.assertEqual(set(keys), {1, 5, 10})
+        for t in (1, 5, 10):
+            self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12],
+                                   before[t], places=4)
         cmds.undo()
         self.assertEqual(cmds.keyframe(control + ".translateX", query=True,
                                        timeChange=True), [1.0, 10.0])
 
-    def test_reverse_switch_restores_sparse_trajectory_and_undo(self):
+    def test_reverse_switch_preserves_switched_key_poses_and_undo(self):
         offset = cmds.createNode("transform", name="reverse_offset")
         control = cmds.parent(self._enum_control("reverse_ctrl", "World:Offset"), offset)[0]
         condition = cmds.createNode("condition", name="reverse_condition")
@@ -253,24 +304,24 @@ class SpaceSwitchTests(unittest.TestCase):
         for frame, value in ((4, 1), (7, 0)):
             with spaceswitch.UndoChunk("ReverseSparseSpace"):
                 cmds.currentTime(frame)
+                pose_before = cmds.getAttr(control + ".worldMatrix[0]")[12]
                 executor.apply_requests(
                     [([spaceswitch.SwitchOperation(control, control, "space", value)], False)],
                     False, [frame, frame])
+                self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]")[12],
+                                       pose_before, places=4)
         self.assertEqual(cmds.getAttr(control + ".space", time=4), 1)
         self.assertEqual(cmds.getAttr(control + ".space", time=7), 0)
-        differences = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - original[t]
-                       for t in samples}
-        worst = max(differences, key=lambda t: abs(differences[t]))
-        self.assertLess(abs(differences[worst]), 0.002,
-                        "Worst frame %s: %s, switch=%s, keys=%s" %
-                        (worst, differences[worst], cmds.getAttr(control + ".space", time=worst),
-                         cmds.keyframe(control + ".space", query=True, timeChange=True)))
+        self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
+                                           timeChange=True)), {1, 4, 7, 10})
+        self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]", time=1)[12],
+                               original[1], places=4)
         cmds.undo()
         self.assertEqual(cmds.getAttr(control + ".space", time=7), 1)
         cmds.undo()
         self.assertEqual(cmds.getAttr(control + ".space", time=4), 0)
 
-    def test_original_keys_mode_rejects_unrepresentable_motion_without_baking(self):
+    def test_no_subframe_validation_failure_and_undo_restores_original_keys(self):
         offset = cmds.createNode("transform", name="strict_offset")
         control = cmds.parent(self._enum_control("strict_ctrl", "World:Offset"), offset)[0]
         condition = cmds.createNode("condition", name="strict_condition")
@@ -285,12 +336,12 @@ class SpaceSwitchTests(unittest.TestCase):
         before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12]
                   for t in (1, 2.125, 4.875, 5, 7.5, 10)}
         cmds.currentTime(5)
-        with self.assertRaisesRegex(spaceswitch.PoseCompensationError,
-                                    "Original animation keys cannot preserve"):
-            with spaceswitch.UndoChunk("StrictSparseReject"):
-                spaceswitch.SwitchExecutor(_OriginalKeysOwner()).apply_requests(
-                    [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
-                    False, [5, 5])
+        with spaceswitch.UndoChunk("SparseKeysOnly"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
+                                           timeChange=True)), {1, 5, 10})
         cmds.undo()
         self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
         self.assertEqual(cmds.keyframe(control + ".translateX", query=True,
@@ -299,7 +350,7 @@ class SpaceSwitchTests(unittest.TestCase):
             self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12],
                                    expected, places=5)
 
-    def test_timeline_range_preserves_motion_outside_selected_interval(self):
+    def test_timeline_range_preserves_authored_key_poses_outside_selection(self):
         offset = cmds.createNode("transform", name="range_motion_offset")
         control = self._enum_control("range_motion_ctrl", "World:Offset")
         control = cmds.parent(control, offset)[0]
@@ -321,7 +372,7 @@ class SpaceSwitchTests(unittest.TestCase):
         self.assertEqual(cmds.getAttr(control + ".space", time=3), 0)
         self.assertEqual(cmds.getAttr(control + ".space", time=5), 1)
         self.assertEqual(cmds.getAttr(control + ".space", time=8), 0)
-        for t in samples:
+        for t in (1, 5, 10):
             self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(
                 before[t], cmds.getAttr(control + ".worldMatrix[0]", time=t))),
                 "Selected-range world trajectory changed at %s" % t)
@@ -360,8 +411,9 @@ class SpaceSwitchTests(unittest.TestCase):
                 False, [5, 5])
         self.assertEqual(cmds.keyframe(base_curve, q=True, valueChange=True),
                          original_base)
-        self.assertIn(6, cmds.keyframe(layer_curve, q=True, timeChange=True))
-        for t in samples:
+        self.assertEqual(set(cmds.keyframe(layer_curve, q=True,
+                                           timeChange=True)), {1, 5, 10})
+        for t in (1, 5, 10):
             self.assertTrue(all(abs(a-b) < 1e-4 for a, b in zip(
                 before[t], cmds.getAttr(control + ".worldMatrix[0]", time=t))),
                 "Layered world trajectory changed at %s" % t)

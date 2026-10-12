@@ -3408,8 +3408,6 @@ class SwitchExecutor(object):
                 "rotateX", "rotateY", "rotateZ",
                 "scaleX", "scaleY", "scaleZ")
     EPSILON = 1e-5
-    TRAJECTORY_TOLERANCE = 1e-3
-    MAX_TRAJECTORY_PROBES = 520
 
     def __init__(self, owner):
         self.owner = owner
@@ -3630,78 +3628,39 @@ class SwitchExecutor(object):
                          "all_frames": all_frames})
         return jobs, fast
 
-    def _trajectory_frames(self, job, timeline_selection, selected_range,
-                           include_subframes=True):
-        """Frames safeguarding motion when a space key is inserted.
+    def _key_frames_for_job(self, job, timeline_selection, selected_range):
+        """Compensate on existing control keys around the requested switch.
 
-        Inserting a compensated transform key changes the splines on both sides
-        of that key, including frames whose switch attribute has not changed.
-        Sample the enclosing animated segment at actual frame intervals, and
-        restore the range boundary when the user selected a timeline section.
+        One set of authored key times is captured once and then applied once.
+        No interpolated frames, sampling grid or off-key correction keys.
         """
         frames = set(job["frames"])
-        if not job["keyed"] or not any(op.xform_target for op in job["ops"]):
+        if not job["keyed"]:
             return frames
-        key_times = set(job["guards"])
-        key_times.update(Maya.key_times_for_plug(job["op"].plug))
+        original = set(job["guards"])
+        switch_times = Maya.key_times_for_plug(job["op"].plug)
+        original.update(switch_times)
         for op in job["ops"]:
             if op.xform_target:
-                key_times.update(self.transform_key_times(op.xform_target))
-        if not key_times:
+                original.update(self.transform_key_times(op.xform_target))
+        if not original:
             return frames
+        if job["all_frames"]:
+            return frames | original
+        low, high = min(frames), max(frames)
         if timeline_selection:
-            boundary_start = float(selected_range[0])
-            boundary_end = float(selected_range[1])
-            previous = [t for t in key_times if t < boundary_start]
-            following = [t for t in key_times if t > boundary_end]
-            # New keys at the selected range's edges affect the interpolation
-            # of its enclosing splines. Protect their whole neighbouring
-            # segments, including samples outside the selected time slider.
-            first = max(previous) if previous else boundary_start - 1.0
-            last = min(following) if following else boundary_end
-        elif job["all_frames"]:
-            first, last = min(frames | key_times), max(frames | key_times)
-        else:
-            low, high = min(frames), max(frames)
-            previous = [t for t in key_times if t < low]
-            following = [t for t in key_times if t > high]
-            first = max(previous) if previous else low
-            last = min(following) if following else high
-            # Previous compensation may have inserted dozens of T/R keys.
-            # They must never truncate the interval of a subsequent reverse
-            # switch: the preceding/following SPACE keys delimit the region
-            # whose local animation must be re-compensated.
-            switch_times = Maya.key_times_for_plug(job["op"].plug)
-            earlier_switches = [t for t in switch_times if t < low]
-            later_switches = [t for t in switch_times if t > high]
-            if earlier_switches:
-                first = min(first, max(earlier_switches))
-            if later_switches:
-                last = max(last, min(later_switches))
-        frames.update(t for t in key_times if first <= t <= last)
-        if include_subframes:
-            # These are verification points. The coordinator no longer bakes
-            # transform keys at every point; it inserts keys only at misses.
-            span = max(0.0, last - first)
-            interval = max(0.0625, math.ceil(span / 32.0) * 0.0625)
-            if interval > 0.0625:
-                self.issues.append("Trajectory verified every %g frames over %s-%s"
-                                   % (interval, first, last))
-            current = math.ceil(first / interval) * interval
-            while current <= last:
-                frames.add(round(float(current), 6))
-                current += interval
-        # A space key introduces a discontinuity in local T/R even though the
-        # desired world trajectory is continuous. A sample only at the key
-        # lets spline tangents spread that jump across the preceding quarter
-        # frame. Anchor both sides of every switch/guard closely, preserving
-        # the original smooth motion until just before the change.
-        for change in set(job["frames"]) | set(job["guards"]):
-            for nearby in (change - 0.001, change + 0.001):
-                if first <= nearby <= last:
-                    frames.add(round(nearby, 5))
-        frames.update((float(first), float(last)))
-        return frames
+            low, high = float(selected_range[0]), float(selected_range[1])
+        previous = [time for time in original if time < low]
+        following = [time for time in original if time > high]
+        first = max(previous) if previous else low
+        last = min(following) if following else high
+        earlier_switches = [time for time in switch_times if time < low]
+        later_switches = [time for time in switch_times if time > high]
+        if earlier_switches:
+            first = min(first, max(earlier_switches))
+        if later_switches:
+            last = max(last, min(later_switches))
+        return frames | {time for time in original if first <= time <= last}
 
     # --- writing (main thread, one call per step) ------------------------------
     @staticmethod
@@ -3713,37 +3672,6 @@ class SwitchExecutor(object):
         cmds.currentTime(frame, update=True)
         return {target: cmds.xform(target, query=True, worldSpace=True, matrix=True)
                 for target in targets}
-
-    @classmethod
-    def _probe_frames(cls, schedule):
-        """Check midpoints without inserting extra keys unless they drift.
-
-        Do not probe the tiny discontinuity bracket around a switch: the local
-        channel jump is necessarily extremely steep there.
-        """
-        result = {}
-        frames = sorted(schedule)
-        for previous, following in zip(frames, frames[1:]):
-            if following - previous < 0.04:
-                continue
-            common = set(schedule[previous]) & set(schedule[following])
-            if common:
-                result[round((previous + following) / 2.0, 6)] = {
-                    node: schedule[previous][node] or schedule[following][node]
-                    for node in common
-                }
-        if len(result) > cls.MAX_TRAJECTORY_PROBES:
-            # Preserve deterministic spatial coverage and bounded evaluation.
-            keys = sorted(result)
-            step = math.ceil(len(keys) / float(cls.MAX_TRAJECTORY_PROBES))
-            result = {frame: result[frame] for frame in keys[::step]}
-        return result
-
-    @classmethod
-    def _pose_errors(cls, frame, snapshot):
-        actual = cls._capture(frame, list(snapshot))
-        return {target: max(abs(a - b) for a, b in zip(actual[target], matrix))
-                for target, matrix in snapshot.items()}
 
     def _begin_write(self, schedule, targets):
         ctx = {
@@ -3922,68 +3850,44 @@ class SwitchExecutor(object):
         runner = runner or OperationRunner()
         self.last_range = None
         self.issues = []
-        estimate = 0
-        for operations, all_frames in requests:
-            for operation in operations:
-                times = self.transform_key_times(operation.xform_target)
-                if times:
-                    # The actual work includes trajectory samples between
-                    # authored keys, even for a current-frame switch. Select
-                    # the event-loop runner before entering the coordinator.
-                    span = max(times) - min(times)
-                    estimate += min(480, max(1, int(span * 2.0) + 1))
-                else:
-                    estimate += 1
+        estimate = sum(max(1, len(self.transform_key_times(op.xform_target)))
+                       if all_frames or timeline_selection else 1
+                       for operations, all_frames in requests for op in operations)
 
         def coordinator(run):
             jobs, fast = run.main(self._plan, requests, timeline_selection, selected_range)
             if not jobs and not fast:
                 return set()
+            if not jobs:
+                # Pure rotate-order conversion edits the original curves in
+                # place. No frame capture, timeline pass or compensation UI.
+                run.check(wrote=False)
+                run.wrote = True
+                for prepared in fast:
+                    run.main(self._apply_rotation, prepared)
+                return {prepared[0].xform_target for prepared in fast}
             schedule = {}
-            verification = {}
             for job in jobs:
-                sample_frames = run.main(self._trajectory_frames, job, timeline_selection,
-                                         selected_range)
-                anchor_frames = run.main(self._trajectory_frames, job, timeline_selection,
-                                         selected_range, False)
+                frames = run.main(self._key_frames_for_job, job,
+                                  timeline_selection, selected_range)
                 for op in job["ops"]:
                     target = op.xform_target
                     if not target:
                         continue  # no xform target: the switch is written, no pose is held
-                    for frame in sample_frames:
-                        destination = schedule if frame in anchor_frames else verification
-                        slot = destination.setdefault(frame, {})
+                    for frame in frames:
+                        slot = schedule.setdefault(frame, {})
                         slot[target] = slot.get(target, False) or job["keyed"]
             targets = sorted({t for slot in schedule.values() for t in slot})
-            probes = self._probe_frames(schedule)
-            for frame, slot in verification.items():
-                # Another operation may have an authored anchor at this time.
-                # Verify the other targets even though they need no key here.
-                pending = {target: keyed for target, keyed in slot.items()
-                           if target not in schedule.get(frame, {})}
-                if pending:
-                    probes.setdefault(frame, {}).update(pending)
-            if len(probes) > self.MAX_TRAJECTORY_PROBES:
-                frames = sorted(probes)
-                stride = math.ceil(len(frames) / float(self.MAX_TRAJECTORY_PROBES))
-                probes = {frame: probes[frame] for frame in frames[::stride]}
-                self.issues.append("Trajectory verification limited to %s subframes"
-                                   % len(probes))
             self.last_range = (min(schedule), max(schedule)) if schedule else None
-            run.set_total(len(schedule) * 2 + len(probes) * 3 + 1)
+            run.set_total(len(schedule) * 2 + 1)
 
             snapshots = {}
-            probe_snapshots = {}
             run.status = "SpaceSwitch: saving positions"
             initial_time = run.main(cmds.currentTime, query=True)
             try:
                 for frame in sorted(schedule):
                     run.check(wrote=False)
                     snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
-                    run.step()
-                for frame in sorted(probes):
-                    run.check(wrote=False)
-                    probe_snapshots[frame] = run.main(self._capture, frame, list(probes[frame]))
                     run.step()
             finally:
                 run.main(cmds.currentTime, initial_time, update=True)
@@ -3998,37 +3902,6 @@ class SwitchExecutor(object):
                     run.check()
                     run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
                     run.step()
-                # Original-key mode validates intermediates but never keys them.
-                # A rig that cannot be represented by those keys fails cleanly;
-                # high-fidelity correction is an explicit opt-in for that case.
-                refine = getattr(self.owner, "allow_subframe_compensation", True)
-                for attempt in range(2 if refine else 1):
-                    misses = {}
-                    for frame in sorted(probes):
-                        run.check()
-                        errors = run.main(self._pose_errors, frame, probe_snapshots[frame])
-                        if any(value > self.TRAJECTORY_TOLERANCE for value in errors.values()):
-                            misses[frame] = probes[frame]
-                        run.step()
-                    if not misses:
-                        break
-                    if not refine:
-                        raise PoseCompensationError(
-                            "Original animation keys cannot preserve the world trajectory "
-                            "at %s; enable high-fidelity subframe compensation to allow "
-                            "additional keys" % next(iter(sorted(misses))))
-                    for frame in sorted(misses):
-                        run.check()
-                        run.main(self._compensate_frame, frame, misses[frame],
-                                 probe_snapshots[frame], ctx)
-                        run.step()
-                else:
-                    for frame in sorted(probes):
-                        run.check()
-                        errors = run.main(self._pose_errors, frame, probe_snapshots[frame])
-                        if any(value > self.TRAJECTORY_TOLERANCE for value in errors.values()):
-                            raise PoseCompensationError(
-                                "World trajectory could not be preserved at subframe %s" % frame)
             finally:
                 run.main(self._end_write, ctx)
             return set(targets) | {item[0].xform_target for item in fast}
@@ -4447,8 +4320,6 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.all_frames = self._setting_bool("all_frames", False)
         self.euler_filter = self._setting_bool("euler_filter", True)
         self.fast_rotation_order = self._setting_bool("fast_rotation_order", True)
-        self.allow_subframe_compensation = self._setting_bool(
-            "allow_subframe_compensation", False)
         self.show_rotate_order = self._setting_bool("show_rotate_order", True)
         self.asset_view = self._setting_bool("asset_view", False)
         self._asset_namespace = None
@@ -5345,16 +5216,6 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         )
         euler_action.setCheckable(True)
         euler_action.setChecked(self.euler_filter)
-
-        compensation_action = self.context_menu.addAction(
-            "High-fidelity subframe compensation",
-            description="Optional: insert additional keys when original authored keys "
-                        "cannot preserve world motion. Disabled by default to keep curves sparse.",
-        )
-        compensation_action.setCheckable(True)
-        compensation_action.setChecked(self.allow_subframe_compensation)
-        compensation_action.toggled.connect(
-            lambda state: self.set_setting("allow_subframe_compensation", state))
 
         self.context_menu.addSeparator()
 
