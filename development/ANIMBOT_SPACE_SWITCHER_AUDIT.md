@@ -40,6 +40,9 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
 | Numeric switch discontinuity | The compiled handler writes explicit switch keys, but its obfuscated tangent decisions have not been completely recovered | Camstool now steps the preceding curve segment when writing a discrete switch key; Maya test exposed 0.84375 pre-switch interpolation before the fix |
 | Rotate-order scoring | Named `__getNodeGimbalScores` at anchor 1165; `rotateOrder`, temporary duplicate, transform sampling | `GimbalAnalyzer` computes mean and worst-frame scores; Maya scoring test |
 | Runtime cleanup | Handler at anchor 1802 includes `CORE.nodeBot.deleteNode` after temporary duplicate/constraint work | No temporary Maya nodes are created by Camstool's matrix-based compensation; undo chunk and main-thread marshal are tested |
+| Reference compensation branch | Handler at anchor 1802 bytecode offsets 830–904 create a parent-only `animBot_Temp_#` duplicate; offsets 1250–1348 conditionally run `pointConstraint`, and 1508–1606 call `orientConstraint`; offsets 1360–1762 read `tx/ty/tz/rx/ry/rz` after constraints | Direct executable control-flow evidence of a temporary-duplicate/constraint sampling route, *not* proof that every target takes that route. Camstool's matrix compensation supports nested parent/child targets in Maya without persistent temporary nodes. |
+| Reference explicit channel keys | Main handler at offsets 2248–2430 branches on `isKeyable`: `cmds.setKeyframe(..., attribute=..., time=..., value=...)` if keyable, otherwise invokes an obfuscated attribute setter. At offsets 2836–3116 and 3306 onward, it writes explicit `tx/ty/tz/rx/ry/rz` values reconstructed from temporary references. | Camstool can key channel-box-only switch attributes, and now verifies that switch and compensated transform keys actually appear in Maya's curve data. A deliberately dropped `setKeyframe` raises `PoseCompensationError` for transactional UI rollback. |
+| Layered rotation curves | No `animLayer` symbol appears in the searched names/constants of the main switch handler or `core313.pyc`; indirect wrappers and obfuscated names remain possible | Maya 2024's selected layer receives compensation keys while base keys stay unchanged. Camstool's Euler filtering now traverses `animBlendNode*` upstream to reach both base and layered rotation curves; tested through the real Maya DG and widget. This is Maya-derived behavior, not attributed to animBot. |
 | Impossible pose and interrupted operation | The reference uses temporary transforms and multiple write/cleanup stages; full exception edges remain obfuscated | Camstool verifies the evaluated matrix after writing, raises `PoseCompensationError` if exact matching is impossible, and rolls the undo chunk back; tests cover fully locked translation, selected-range undo/redo, and cancellation after partial writes |
 | UI lifecycle | UI bytecode contains Qt layouts, click callbacks, tooltips, hide/deleteLater | Popup, multi-switch dialog, target setup, callback removal and refresh batching in `SpaceSwitchAlehaWidget` |
 
@@ -52,7 +55,12 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
   numeric hold; failing locked-channel rollback; cancellation after partial
   compensation; single-step undo/redo; coordinator main-thread marshalling;
   repeated/no-op switching; oriented joints; callback disposal; gimbal sample
-  ranking and UI widget creation.
+  ranking and UI widget creation. Additional cases: active animation-layer
+  compensation without new base keys, layered Euler-filter curve discovery,
+  nested controls with shared space attribute and reversed request order,
+  constraint-connected/locked translation with undo, channel-box-only attribute
+  switching, silently refused key insertion, and a real Alt-click on a visible
+  switch row followed by Maya undo.
 - Inference: the duplicate-and-constraint path preserves the old world pose
   across space evaluation. Camstool implements that user-visible invariant with
   sampled matrices rather than reproducing the reference's temporary nodes.
@@ -60,7 +68,25 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
   animBot's exact failure handling for constraints/locked rig channels, callback
   lifecycle inside Maya's full graphical shell, and commercial plugin-specific
   persistence formats. Maya standalone tests do not simulate every production rig
-  or Graph Editor interaction.
+  or Graph Editor interaction. A Maya probe also found a concrete residual
+  limitation: on sparse current-frame switches, altering a compensated curve
+  key at frame 5 can change the interpolated world pose at frame 4 even when
+  the original key poses at frames 1 and 10 remain fixed. A dense/in-between
+  compensation mode or shape-preserving discontinuity handling requires a
+  separate algorithm; the current key-sample guarantee does not imply
+  continuous-time preservation between those samples.
+
+## Verification scope (Maya 2024)
+
+The expanded `tests/test_spaceswitch_maya.py` suite exercises 32 independent
+scenarios, including the six new complex-rig/layer/write-failure cases above
+and native Qt mouse interaction. These are scene-level observations. The
+failed intermediate-frame probe is recorded as a limitation rather than
+misrepresented as a passing regression. The reference branch above also
+includes cleanup on cancellation at offsets 1966–2174, but its exact
+exception-safety guarantees remain obscured by called wrappers; Camstool's
+transaction is verified independently through undo of rejected keys and
+constraint-impossible poses.
 
 ## Relevant locations
 

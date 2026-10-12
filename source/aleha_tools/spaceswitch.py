@@ -251,6 +251,31 @@ class Maya(object):
             return set()
 
     @staticmethod
+    def upstream_animation_curves(plug):
+        """Find base and layered curves driving one plug, through blend nodes.
+
+        A direct listConnections(type='animCurve') stops at animBlendNode and
+        misses animation-layer rotation curves that also need Euler filtering.
+        Only traverse Maya's animation blend network, avoiding unrelated rig
+        utilities and cyclic dependency graphs.
+        """
+        pending, visited, curves = [plug], set(), set()
+        while pending:
+            destination = pending.pop()
+            if destination in visited:
+                continue
+            visited.add(destination)
+            for source in cmds.listConnections(destination, source=True,
+                                               destination=False,
+                                               skipConversionNodes=True) or []:
+                node_type = cmds.nodeType(source)
+                if node_type.startswith("animCurve"):
+                    curves.add(source)
+                elif node_type.startswith("animBlendNode"):
+                    pending.append(source)
+        return sorted(curves)
+
+    @staticmethod
     def key_times_for_node(node):
         try:
             return set(cmds.keyframe(node, query=True, timeChange=True) or [])
@@ -3571,7 +3596,7 @@ class SwitchExecutor(object):
         for target in targets:
             paths = cmds.ls(target, long=True) or [target]
             ctx["depth"][target] = paths[0].count("|")
-            settable, animated, layered, locked = [], set(), [], []
+            settable, animated, locked = [], set(), []
             for channel in self.CHANNELS:
                 plug = Maya.plug(target, channel)
                 try:
@@ -3581,7 +3606,11 @@ class SwitchExecutor(object):
                         sources = cmds.listConnections(plug, source=True, destination=False,
                                                        skipConversionNodes=True) or []
                         if any(cmds.nodeType(n).startswith("animBlendNode") for n in sources):
-                            layered.append(channel)
+                            # A layer's blend-node connection makes getAttr
+                            # report non-settable on some Maya/rig versions,
+                            # although the active layer can still be keyed.
+                            if not cmds.getAttr(plug, lock=True):
+                                settable.append(channel)
                         elif channel not in self.CHANNELS[6:]:
                             locked.append(channel)
                 except Exception:
@@ -3589,10 +3618,11 @@ class SwitchExecutor(object):
                 if Maya.key_times_for_plug(plug):
                     animated.add(channel)
             ctx["channels"][target] = (settable, animated)
-            if layered:
-                self.issues.append("%s: %s are in animation layers, pose not matched on them"
-                                   % (target, ", ".join(layered)))
-            elif locked and len(locked) < 6:
+            # Maya can key selected animation layers even when a blend node
+            # makes getAttr(settable=True) false. Successful compensation is
+            # checked against the evaluated matrix; key writes are checked
+            # separately below. Merely finding a blend node is not a failure.
+            if locked and len(locked) < 6:
                 self.issues.append("%s: %s locked/driven, pose may not match exactly"
                                    % (target, ", ".join(locked)))
         cmds.autoKeyframe(state=False)
@@ -3612,6 +3642,20 @@ class SwitchExecutor(object):
                 for frame, value in job["guards"].items():
                     cmds.setKeyframe(operation.plug, time=(frame, frame), value=value,
                                      outTangentType="step")
+                # Maya may quietly refuse to key a channel that is editable but
+                # driven by a non-curve source or an inactive animation layer.
+                # Detect that before compensating any transforms; the UI can
+                # then undo the entire operation as one transaction.
+                written = {**{t: float(operation.value) for t in job["frames"]},
+                           **job["guards"]}
+                actual_times = Maya.key_times_for_plug(operation.plug)
+                for frame, value in written.items():
+                    evaluated = SwitchExecutor._value_at(operation.plug, frame)
+                    if (frame not in actual_times or evaluated is None
+                            or abs(evaluated - value) > SwitchExecutor.EPSILON):
+                        raise PoseCompensationError(
+                            "%s could not be keyed to %s at frame %s"
+                            % (operation.plug, value, frame))
                 # Maya's default tangent on a pre-existing numeric key can be
                 # spline/auto. A stepped outgoing tangent on the NEW switch key
                 # alone would interpolate the preceding space into this one.
@@ -3675,6 +3719,12 @@ class SwitchExecutor(object):
                       or (may_key and abs(after.get(channel, 0.0) - before.get(channel, 0.0)) > self.EPSILON)]
             if to_key:
                 cmds.setKeyframe(target, attribute=to_key, time=(frame, frame))
+                for channel in to_key:
+                    plug = Maya.plug(target, channel)
+                    if frame not in Maya.key_times_for_plug(plug):
+                        raise PoseCompensationError(
+                            "%s could not key compensated pose at frame %s"
+                            % (plug, frame))
 
     @staticmethod
     def _end_write(ctx):
@@ -4847,8 +4897,7 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
                 if not cmds.objExists(plug):
                     continue
 
-                connected = cmds.listConnections(plug, source=True, type="animCurve") or []
-                curves.extend([curve for curve in connected if Maya.exists(curve)])
+                curves.extend(Maya.upstream_animation_curves(plug))
 
         curves = sorted(set(curves))
 

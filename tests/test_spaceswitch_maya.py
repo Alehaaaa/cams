@@ -7,7 +7,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "source")))
 
-from PySide2 import QtCore, QtWidgets
+from PySide2 import QtCore, QtTest, QtWidgets
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
@@ -55,10 +55,217 @@ class SpaceSwitchTests(unittest.TestCase):
         node = self._enum_control()
         items = spaceswitch.Maya.enum_items(node, "space")
         self.assertEqual(items, [("World", 0), ("Chest", 3), ("Head", 4)])
-
         builder = spaceswitch.SwitchCatalogBuilder(spaceswitch.GimbalAnalyzer())
         entry = builder.custom_entry(node, "space")[0][2].to_dict()
         self.assertEqual(entry["enum_values"], [0, 3, 4])
+
+    def test_animation_layer_space_switch_preserves_pose_and_layer_keys(self):
+        offset = cmds.createNode("transform", name="layer_offset")
+        control = self._enum_control("layer_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="layer_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 10)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=2)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=5)
+        cmds.select(control)
+        layer = cmds.animLayer("SpaceTestLayer")
+        cmds.animLayer(layer, edit=True, addSelectedObjects=True)
+        cmds.animLayer(layer, edit=True, selected=True, preferred=True)
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=3, animLayer=layer)
+        cmds.setKeyframe(control, attribute="translateX", time=10, value=6, animLayer=layer)
+        layer_curve = cmds.animLayer(layer, query=True,
+                                    findCurveForPlug=control + ".translateX")
+        original_layer_keys = cmds.keyframe(layer_curve, query=True, timeChange=True) or []
+        self.assertNotIn(5, original_layer_keys)
+        base_curve = cmds.animLayer(cmds.animLayer(query=True, root=True), query=True,
+                                    findCurveForPlug=control + ".translateX")
+        original_base_keys = cmds.keyframe(base_curve, query=True, timeChange=True) or []
+        cmds.currentTime(5)
+        before = {frame: cmds.getAttr(control + ".worldMatrix[0]", time=frame)
+                  for frame in (1, 5, 10)}
+        operation = spaceswitch.SwitchOperation(control, control, "space", 1)
+        with spaceswitch.UndoChunk("LayeredSpaceSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([operation], False)], False, [5, 5])
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 1)
+        self.assertTrue(cmds.animLayer(layer, query=True, blendNodes=True))
+        self.assertTrue(layer_curve)
+        self.assertIn(5, cmds.keyframe(layer_curve, query=True, timeChange=True) or [],
+                      "Compensation must key the active layer, preserving the base animation")
+        self.assertEqual(cmds.keyframe(base_curve, query=True, timeChange=True) or [],
+                         original_base_keys)
+        for frame, matrix in before.items():
+            after = cmds.getAttr(control + ".worldMatrix[0]", time=frame)
+            self.assertTrue(all(abs(a - b) < 1e-4 for a, b in zip(matrix, after)),
+                            "Layered world pose changed at %s: %s -> %s" % (frame, matrix, after))
+
+    def test_nested_driven_controls_compensate_in_parent_first_order(self):
+        offset = cmds.createNode("transform", name="nested_offset")
+        parent = self._enum_control("nested_parent", "World:Offset")
+        parent = cmds.parent(parent, offset)[0]
+        child = cmds.createNode("transform", name="nested_child", parent=parent)
+        cmds.setAttr(child + ".translateX", 3)
+        cmds.setAttr(parent + ".rotateY", 20)
+        condition = cmds.createNode("condition", name="nested_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 9)
+        cmds.connectAttr(parent + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        before = {n: cmds.xform(n, q=True, ws=True, matrix=True)
+                  for n in (parent, child)}
+        operations = [spaceswitch.SwitchOperation(n, parent, "space", 1)
+                      for n in (child, parent)]
+        with spaceswitch.UndoChunk("NestedTargets"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [(operations, False)], False, [1, 1])
+        for n, matrix in before.items():
+            self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+                matrix, cmds.xform(n, q=True, ws=True, matrix=True))), n)
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(parent + ".space"), 0)
+
+    def test_constraint_connected_translation_failure_is_undoable(self):
+        offset = cmds.createNode("transform", name="constrained_offset")
+        control = self._enum_control("constrained_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="constraint_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 10)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        driver = cmds.createNode("transform", name="constraint_driver", parent=offset)
+        cmds.pointConstraint(driver, control)
+        cmds.setAttr(control + ".translateX", lock=True)
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+        with self.assertRaises(spaceswitch.PoseCompensationError):
+            with spaceswitch.UndoChunk("ConstrainedTarget"):
+                spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                    [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                    False, [1, 1])
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space"), 0)
+        self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+            before, cmds.xform(control, q=True, ws=True, matrix=True))))
+        self.assertFalse(cmds.ls("camstool_spaceTemp_*"))
+
+    def test_channel_box_only_switch_keys_when_animation_requires_it(self):
+        offset = cmds.createNode("transform", name="nonkeyable_offset")
+        control = cmds.createNode("transform", name="nonkeyable_ctrl", parent=offset)
+        cmds.addAttr(control, longName="space", attributeType="enum",
+                     enumName="World:Offset", keyable=False)
+        cmds.setAttr(control + ".space", channelBox=True)
+        condition = cmds.createNode("condition", name="nonkeyable_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 8)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=2)
+        cmds.setKeyframe(control, attribute="translateX", time=8, value=5)
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t) for t in (1, 8)}
+        with spaceswitch.UndoChunk("NonkeyableSwitch"):
+            spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], True)],
+                False, [1, 8])
+        self.assertEqual([cmds.getAttr(control + ".space", time=t) for t in (1, 8)],
+                         [1, 1])
+        for t, matrix in before.items():
+            self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+                matrix, cmds.getAttr(control + ".worldMatrix[0]", time=t))))
+        self.assertEqual(set(cmds.keyframe(control + ".space", q=True, timeChange=True) or []),
+                         {1, 8})
+
+    def test_silently_rejected_switch_key_aborts_before_pose_write(self):
+        offset = cmds.createNode("transform", name="rejected_offset")
+        control = self._enum_control("rejected_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="rejected_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 10)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control, attribute="translateX", time=1, value=1)
+        cmds.setKeyframe(control, attribute="translateX", time=8, value=4)
+        original_key = cmds.setKeyframe
+
+        def reject_switch_key(*args, **kwargs):
+            if args and args[0] == control + ".space":
+                return None  # Maya can refuse an edit without raising
+            return original_key(*args, **kwargs)
+
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+        with mock.patch.object(spaceswitch.cmds, "setKeyframe", side_effect=reject_switch_key):
+            with self.assertRaisesRegex(spaceswitch.PoseCompensationError,
+                                        "could not be keyed"):
+                with spaceswitch.UndoChunk("RejectedSwitch"):
+                    spaceswitch.SwitchExecutor(_Owner()).apply_requests(
+                        [([spaceswitch.SwitchOperation(control, control, "space", 1)], True)],
+                        False, [1, 8])
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space"), 0)
+        self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+            before, cmds.xform(control, q=True, ws=True, matrix=True))))
+
+    def test_euler_filter_discovers_rotation_curves_through_animation_layers(self):
+        control = cmds.createNode("transform", name="layer_rotate_ctrl")
+        cmds.setKeyframe(control, attribute="rotateY", time=1, value=170)
+        cmds.setKeyframe(control, attribute="rotateY", time=10, value=-170)
+        root_curve = cmds.listConnections(control + ".rotateY", type="animCurve")[0]
+        cmds.select(control)
+        layer = cmds.animLayer("RotationLayer")
+        cmds.animLayer(layer, edit=True, addSelectedObjects=True)
+        cmds.animLayer(layer, edit=True, preferred=True, selected=True)
+        cmds.setKeyframe(control, attribute="rotateY", time=1, value=20, animLayer=layer)
+        cmds.setKeyframe(control, attribute="rotateY", time=10, value=50, animLayer=layer)
+        layer_curve = cmds.animLayer(layer, query=True,
+                                    findCurveForPlug=control + ".rotateY")[0]
+        found = spaceswitch.Maya.upstream_animation_curves(control + ".rotateY")
+        self.assertIn(root_curve, found)
+        self.assertIn(layer_curve, found)
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        with mock.patch.object(spaceswitch.cmds, "filterCurve") as filter_curve:
+            widget.apply_euler_filter([control], (1, 10))
+        args, kwargs = filter_curve.call_args
+        self.assertIn(root_curve, args)
+        self.assertIn(layer_curve, args)
+        self.assertEqual((kwargs["startTime"], kwargs["endTime"]), (1, 10))
+        widget.apply_euler_filter([control], (1, 10))
+        widget.close()
+        parent.close()
+
+    def test_alt_click_on_visible_switch_row_executes_and_undoes(self):
+        offset = cmds.createNode("transform", name="click_offset")
+        control = self._enum_control("click_ctrl", "World:Offset")
+        control = cmds.parent(control, offset)[0]
+        condition = cmds.createNode("condition", name="click_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 7)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.select(control)
+        parent = QtWidgets.QWidget()
+        widget = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        widget.euler_filter = False
+        widget.show()
+        widget.refresh(force=True)
+        app.processEvents()
+        row = next(item for (item, _options) in widget._active_switch_widgets.values()
+                   if item.enum_attr == "space")
+        before = cmds.xform(control, q=True, ws=True, matrix=True)
+        with mock.patch.object(spaceswitch, "_cycle_modifier_held", return_value=True):
+            QtTest.QTest.mouseClick(row, QtCore.Qt.LeftButton,
+                                    QtCore.Qt.AltModifier, pos=row.rect().center())
+            app.processEvents()
+        self.assertEqual(cmds.getAttr(control + ".space"), 1)
+        self.assertTrue(all(abs(a-b) < 1e-5 for a, b in zip(
+            before, cmds.xform(control, q=True, ws=True, matrix=True))))
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space"), 0)
+        widget.close()
+        parent.close()
 
     def test_selection_discovery_requires_connection_but_custom_does_not(self):
         node = self._enum_control()
