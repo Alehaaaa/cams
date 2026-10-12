@@ -3728,8 +3728,6 @@ class SwitchExecutor(object):
                 self.issues.append("%s: %s locked/driven, pose may not match exactly"
                                    % (target, ", ".join(locked)))
         cmds.autoKeyframe(state=False)
-        if len(schedule) > 1:
-            ctx["marker"] = Timeline.create([min(schedule), max(schedule) + 1])
         return ctx
 
     @staticmethod
@@ -3881,29 +3879,36 @@ class SwitchExecutor(object):
             self.last_range = (min(schedule), max(schedule)) if schedule else None
             run.set_total(len(schedule) * 2 + 1)
 
-            snapshots = {}
-            run.status = "SpaceSwitch: saving positions"
-            initial_time = run.main(cmds.currentTime, query=True)
+            marker = (run.main(Timeline.create, [min(schedule), max(schedule) + 1],
+                               autodestroy=None)
+                      if len(schedule) > 1 else None)
             try:
-                for frame in sorted(schedule):
-                    run.check(wrote=False)
-                    snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
-                    run.step()
-            finally:
-                run.main(cmds.currentTime, initial_time, update=True)
+                snapshots = {}
+                run.status = "SpaceSwitch: saving positions"
+                initial_time = run.main(cmds.currentTime, query=True)
+                try:
+                    for frame in sorted(schedule):
+                        run.check(wrote=False)
+                        snapshots[frame] = run.main(self._capture, frame, list(schedule[frame]))
+                        run.step()
+                finally:
+                    run.main(cmds.currentTime, initial_time, update=True)
 
-            run.check(wrote=False)
-            ctx = run.main(self._begin_write, schedule, targets)
-            try:
-                run.wrote = True
-                run.main(self._write_switches, jobs, fast, self)
-                run.step("SpaceSwitch: applying positions")
-                for frame in sorted(schedule):
-                    run.check()
-                    run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
-                    run.step()
+                run.check(wrote=False)
+                ctx = run.main(self._begin_write, schedule, targets)
+                try:
+                    run.wrote = True
+                    run.main(self._write_switches, jobs, fast, self)
+                    run.step("SpaceSwitch: applying positions")
+                    for frame in sorted(schedule):
+                        run.check()
+                        run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
+                        run.step()
+                finally:
+                    run.main(self._end_write, ctx)
             finally:
-                run.main(self._end_write, ctx)
+                if marker is not None:
+                    run.main(marker.delete_marker)
             return set(targets) | {item[0].xform_target for item in fast}
 
         return runner.run(coordinator, estimate)

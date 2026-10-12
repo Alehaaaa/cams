@@ -126,14 +126,23 @@ class SpaceSwitchTests(unittest.TestCase):
             events.append(("apply", frame))
             return original_apply(frame, targets, snapshot, ctx)
 
+        marker = mock.Mock()
+        def create_marker(*args, **kwargs):
+            self.assertIsNone(kwargs.get("autodestroy"))
+            events.append(("tint", "show"))
+            return marker
+
         with mock.patch.object(executor, "_capture", side_effect=capture), \
-             mock.patch.object(executor, "_compensate_frame", side_effect=compensate):
+             mock.patch.object(executor, "_compensate_frame", side_effect=compensate), \
+             mock.patch.object(spaceswitch.Timeline, "create", side_effect=create_marker):
             with spaceswitch.UndoChunk("TwoPhaseSpace"):
                 executor.apply_requests(
                     [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
                     False, [5, 5])
-        self.assertEqual(events, [("save", 1.0), ("save", 5.0), ("save", 10.0),
+        self.assertEqual(events, [("tint", "show"),
+                                  ("save", 1.0), ("save", 5.0), ("save", 10.0),
                                   ("apply", 1.0), ("apply", 5.0), ("apply", 10.0)])
+        marker.delete_marker.assert_called_once_with()
         self.assertEqual(set(cmds.keyframe(control + ".translateX", q=True,
                                            timeChange=True)), {1, 5, 10})
 
