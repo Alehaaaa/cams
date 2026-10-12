@@ -54,6 +54,16 @@ action used by another.
   menu rather than accumulating on the long-lived camera button.
 - The Tool Hub refreshes action validity even when its window remains visible
   across repeated openings; this covers another deleted-QAction edge case.
+- Multi Switch keeps the same floating dialog and the same option widgets when
+  more channels are staged. Diffing by object/attribute identity preserves
+  staged choices and scope, removes stale columns, and recomputes grid wrapping
+  on both resizing and reordering. Headless Qt checks exercise addition,
+  removal, reuse, option retention and 1-to-3-column resize. Larger channel
+  sets scroll vertically inside a bounded-height list without window overflow.
+- Space Switcher's context menu defaults to original-key compensation. Optional
+  high-fidelity correction is persistent and clearly signals that additional
+  subframe keys can be required. Sparse failures restore the entire undo chunk
+  instead of leaving partially switched controls.
 
 ## Tested and remaining scope
 
@@ -63,7 +73,7 @@ validation and color picker/brightness persistence. New coverage checks HUD
 reopen/preset isolation, deleted menu actions, two-camera rig switching and
 focal lengths, Follow/Aim creation from real Maya scene selection, metadata,
 single-step undo and constraint-failure rollback, nested camera context
-selection and reopening the Tool Hub with a destroyed QAction. The 37 Space Switcher
+selection and reopening the Tool Hub with a destroyed QAction. The 42 Space Switcher
 Maya tests include standalone Qt interactions, animated rig compensation and
 transactional undo. These validate component integration in Maya standalone.
 An end-to-end graphical Maya session, dock/undock geometry across OS-specific

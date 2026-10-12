@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -22,10 +23,16 @@ from aleha_tools import spaceswitch
 
 class _Owner(object):
     fast_rotation_order = False
+    allow_subframe_compensation = True
 
 
 class _FastOwner(object):
     fast_rotation_order = True
+    allow_subframe_compensation = True
+
+
+class _OriginalKeysOwner(_Owner):
+    allow_subframe_compensation = False
 
 
 class SpaceSwitchTests(unittest.TestCase):
@@ -44,6 +51,63 @@ class SpaceSwitchTests(unittest.TestCase):
                 widget.deleteLater()
         QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         self.settings.clear()
+
+    def test_multi_switch_columns_reuse_widgets_choices_and_reflow_on_resize(self):
+        parent = QtWidgets.QWidget()
+        parent.analyze_group_gimbal = lambda objects: {}
+        parent._close_multi_switch_dialog = lambda **kwargs: None
+        options = {"World": {}, "Chest": {}}
+
+        def entry(index):
+            item = SimpleNamespace(
+                enum_attr="space", object_label="Control %s" % index,
+                attribute_label="Space", has_mixed_key_values=False,
+                options=["World", "Chest"], current_indices={0},
+                marked_indices=set(), gimbal_info={},
+                objects_map={"control%s" % index: {
+                    "attr_node": "control%s" % index, "attr": "space"}})
+            return item, options
+
+        first, second, third = entry(1), entry(2), entry(3)
+        dialog = spaceswitch.MultiAttributeSwitchDialog(parent, [first, second])
+        original = dialog._column_widgets[0]
+        first_key = dialog._entry_key(first)
+        dialog._choose_option(True, first_key, "Chest")
+        dialog.update_entries([first, second, third])
+        dialog.show()
+        QtWidgets.QApplication.processEvents()
+        self.assertIs(dialog._column_widgets[0], original)
+        self.assertEqual(dialog._selected_options[first_key], "Chest")
+        dialog.resize(235, 350)
+        QtWidgets.QApplication.processEvents()
+        self.assertEqual(dialog._column_count, 1)
+        dialog.resize(750, 350)
+        QtWidgets.QApplication.processEvents()
+        self.assertEqual(dialog._column_count, 3, "Actual width: %s" % dialog.width())
+        dialog.update_entries([first, third])
+        self.assertIs(dialog._column_widgets[0], original)
+        self.assertEqual(len(dialog._column_widgets), 2)
+        third_column = dialog._column_widgets[1]
+        dialog.update_entries([third, first])
+        self.assertIs(dialog._columns_grid.itemAtPosition(0, 0).widget(), third_column)
+        self.assertEqual(dialog._selected_options[first_key], "Chest")
+        dialog.update_entries([entry(index) for index in range(1, 10)])
+        dialog.resize(235, 350)
+        QtWidgets.QApplication.processEvents()
+        self.assertGreater(dialog._columns_scroll.verticalScrollBar().maximum(), 0)
+        dialog.close()
+        parent.close()
+
+    def test_original_key_mode_is_default_and_high_fidelity_opt_in_persists(self):
+        parent = QtWidgets.QWidget()
+        first = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        self.assertFalse(first.allow_subframe_compensation)
+        first.set_setting("allow_subframe_compensation", True)
+        first.close()
+        second = spaceswitch.SpaceSwitchAlehaWidget(popup=False, parent=parent)
+        self.assertTrue(second.allow_subframe_compensation)
+        second.close()
+        parent.close()
 
     @staticmethod
     def _enum_control(name="ctrl", enum_name="World:Chest=3:Head"):
@@ -144,6 +208,96 @@ class SpaceSwitchTests(unittest.TestCase):
                             for t in sample_times), 0.002)
         cmds.undo()
         self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
+
+    def test_constant_offset_switch_keeps_sparse_keys_and_dense_world_motion(self):
+        offset = cmds.createNode("transform", name="sparse_offset")
+        control = cmds.parent(self._enum_control("sparse_ctrl", "World:Offset"), offset)[0]
+        condition = cmds.createNode("condition", name="sparse_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 7)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control + ".translateX", time=1, value=2)
+        cmds.setKeyframe(control + ".translateX", time=10, value=11)
+        cmds.keyTangent(control + ".translateX", edit=True,
+                        inTangentType="linear", outTangentType="linear")
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12]
+                  for t in [1 + i / 16.0 for i in range(145)]}
+        cmds.currentTime(5)
+        with spaceswitch.UndoChunk("SparseTrajectory"):
+            spaceswitch.SwitchExecutor(_OriginalKeysOwner()).apply_requests(
+                [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                False, [5, 5])
+        keys = cmds.keyframe(control + ".translateX", query=True, timeChange=True) or []
+        self.assertLessEqual(len(keys), 12, "Space switch baked too many subframe keys")
+        self.assertLess(max(abs(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - value)
+                            for t, value in before.items()), 0.002)
+        cmds.undo()
+        self.assertEqual(cmds.keyframe(control + ".translateX", query=True,
+                                       timeChange=True), [1.0, 10.0])
+
+    def test_reverse_switch_restores_sparse_trajectory_and_undo(self):
+        offset = cmds.createNode("transform", name="reverse_offset")
+        control = cmds.parent(self._enum_control("reverse_ctrl", "World:Offset"), offset)[0]
+        condition = cmds.createNode("condition", name="reverse_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 4)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control + ".translateX", time=1, value=1)
+        cmds.setKeyframe(control + ".translateX", time=10, value=8)
+        samples = [1 + i / 16.0 for i in range(145)]
+        original = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12]
+                    for t in samples}
+        executor = spaceswitch.SwitchExecutor(_Owner())
+        for frame, value in ((4, 1), (7, 0)):
+            with spaceswitch.UndoChunk("ReverseSparseSpace"):
+                cmds.currentTime(frame)
+                executor.apply_requests(
+                    [([spaceswitch.SwitchOperation(control, control, "space", value)], False)],
+                    False, [frame, frame])
+        self.assertEqual(cmds.getAttr(control + ".space", time=4), 1)
+        self.assertEqual(cmds.getAttr(control + ".space", time=7), 0)
+        differences = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12] - original[t]
+                       for t in samples}
+        worst = max(differences, key=lambda t: abs(differences[t]))
+        self.assertLess(abs(differences[worst]), 0.002,
+                        "Worst frame %s: %s, switch=%s, keys=%s" %
+                        (worst, differences[worst], cmds.getAttr(control + ".space", time=worst),
+                         cmds.keyframe(control + ".space", query=True, timeChange=True)))
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space", time=7), 1)
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space", time=4), 0)
+
+    def test_original_keys_mode_rejects_unrepresentable_motion_without_baking(self):
+        offset = cmds.createNode("transform", name="strict_offset")
+        control = cmds.parent(self._enum_control("strict_ctrl", "World:Offset"), offset)[0]
+        condition = cmds.createNode("condition", name="strict_condition")
+        cmds.setAttr(condition + ".secondTerm", 1)
+        cmds.setAttr(condition + ".colorIfTrueR", 8)
+        cmds.connectAttr(control + ".space", condition + ".firstTerm")
+        cmds.connectAttr(condition + ".outColorR", offset + ".translateX")
+        cmds.setKeyframe(control + ".translateX", time=1, value=2)
+        cmds.setKeyframe(control + ".translateX", time=10, value=11)
+        cmds.keyTangent(control + ".translateX", edit=True,
+                        inTangentType="flat", outTangentType="flat")
+        before = {t: cmds.getAttr(control + ".worldMatrix[0]", time=t)[12]
+                  for t in (1, 2.125, 4.875, 5, 7.5, 10)}
+        cmds.currentTime(5)
+        with self.assertRaisesRegex(spaceswitch.PoseCompensationError,
+                                    "Original animation keys cannot preserve"):
+            with spaceswitch.UndoChunk("StrictSparseReject"):
+                spaceswitch.SwitchExecutor(_OriginalKeysOwner()).apply_requests(
+                    [([spaceswitch.SwitchOperation(control, control, "space", 1)], False)],
+                    False, [5, 5])
+        cmds.undo()
+        self.assertEqual(cmds.getAttr(control + ".space", time=5), 0)
+        self.assertEqual(cmds.keyframe(control + ".translateX", query=True,
+                                       timeChange=True), [1.0, 10.0])
+        for t, expected in before.items():
+            self.assertAlmostEqual(cmds.getAttr(control + ".worldMatrix[0]", time=t)[12],
+                                   expected, places=5)
 
     def test_timeline_range_preserves_motion_outside_selected_interval(self):
         offset = cmds.createNode("transform", name="range_motion_offset")

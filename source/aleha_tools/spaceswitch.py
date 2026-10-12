@@ -2457,52 +2457,46 @@ class MultiAttributeSwitchDialog(FloatingWidget):
         FloatingWidget.__init__(self, popup=False, parent=parent_dialog)
         self.parent_dialog = parent_dialog
         self.entries = list(entries or [])
-        self._prepare_gimbal_results()
         self._selected_options = {}
         self._option_groups = []
         self._column_widgets = []
+        self._columns_by_key = {}
+        self._column_count = 0
+        self._layout_order = ()
         self._all_frames = False
         self.setWindowTitle(_t("Switch Multiple Attributes"))
         self.setMinimumWidth(util.DPI(220))
         self._build_ui()
 
-    def _prepare_gimbal_results(self):
-        """Run deferred rotate-order analysis only for staged multi rows."""
-        for item, _options_map in self.entries:
-            if item.enum_attr != "rotateOrder":
-                continue
-            try:
-                combined = self.parent_dialog.analyze_group_gimbal(
-                    item.objects_map
-                )
-            except Exception as exc:
-                cmds.warning(
-                    "Error analyzing staged rotate orders: {}".format(exc)
-                )
-                combined = {}
-            item.gimbal_info = combined
-
     def _build_ui(self):
-        title = QtWidgets.QLabel(
+        self._title = QtWidgets.QLabel(
             "Switch {} channels".format(len(self.entries)), self.mainContent
         )
-        title.setStyleSheet(
+        self._title.setStyleSheet(
             "color: {}; font-size: {}px; font-weight: bold;".format(
                 COLOR_TEXT_SECONDARY, util.DPI(14)
             )
         )
-        self.mainLayout.addWidget(title)
+        self.mainLayout.addWidget(self._title)
 
         self.mainLayout.addSpacing(util.DPI(10))
         self._add_scope_controls()
         self.mainLayout.addSpacing(util.DPI(10))
-        self._columns_grid = QtWidgets.QGridLayout()
+        self._columns_container = QtWidgets.QWidget(self.mainContent)
+        self._columns_grid = QtWidgets.QGridLayout(self._columns_container)
         self._columns_grid.setContentsMargins(0, 0, 0, 0)
         self._columns_grid.setHorizontalSpacing(util.DPI(6))
         self._columns_grid.setVerticalSpacing(util.DPI(6))
-        self.mainLayout.addLayout(self._columns_grid)
-        self._build_columns()
-        self._layout_columns(QtGui.QGuiApplication.primaryScreen())
+        self._columns_scroll = QtWidgets.QScrollArea(self.mainContent)
+        self._columns_scroll.setWidgetResizable(True)
+        self._columns_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._columns_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._columns_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._columns_scroll.setMinimumHeight(util.DPI(140))
+        self._columns_scroll.setMaximumHeight(util.DPI(440))
+        self._columns_scroll.setWidget(self._columns_container)
+        self.mainLayout.addWidget(self._columns_scroll, 1)
+        self.update_entries(self.entries)
 
         self.setBottomBar(
             buttons=[
@@ -2564,8 +2558,15 @@ class MultiAttributeSwitchDialog(FloatingWidget):
         self._scope_group = group
         self.mainLayout.addLayout(layout)
 
-    def _build_columns(self):
-        for entry_index, (item, options_map) in enumerate(self.entries):
+    @staticmethod
+    def _entry_key(entry):
+        item, options_map = entry
+        return (item.enum_attr,
+                tuple(sorted((target, data.get("attr_node"), data.get("attr"))
+                             for target, data in item.objects_map.items())),
+                tuple(option for option in item.options if option in options_map))
+
+    def _make_column(self, entry_key, item, options_map):
             column = QtWidgets.QWidget(self.mainContent)
             column.setFixedWidth(util.DPI(165))
             column.setStyleSheet("background: transparent;")
@@ -2598,9 +2599,8 @@ class MultiAttributeSwitchDialog(FloatingWidget):
             attribute_heading.setToolTip(item.attribute_label)
             layout.addWidget(attribute_heading)
 
-            group = QtWidgets.QButtonGroup(self)
+            group = QtWidgets.QButtonGroup(column)
             group.setExclusive(True)
-            self._option_groups.append(group)
             option_count = 0
             for option_index, option in enumerate(item.options):
                 if option not in options_map:
@@ -2614,7 +2614,7 @@ class MultiAttributeSwitchDialog(FloatingWidget):
                 button.setCheckable(True)
                 _configure_option_button(button)
                 _connect_checkable_button(
-                    button, self._choose_option, entry_index, option
+                    button, self._choose_option, entry_key, option
                 )
                 _add_option_state_indicator(
                     button,
@@ -2632,19 +2632,50 @@ class MultiAttributeSwitchDialog(FloatingWidget):
                 )
                 layout.addWidget(empty)
             layout.addStretch(1)
-            self._column_widgets.append(column)
+            return column, group
 
-    def _layout_columns(self, screen):
+    def update_entries(self, entries):
+        """Diff staged columns in place; preserve choices and the open window."""
+        entries = list(entries or [])
+        keys = [self._entry_key(entry) for entry in entries]
+        for key in list(self._columns_by_key):
+            if key not in keys:
+                column, _group = self._columns_by_key.pop(key)
+                self._columns_grid.removeWidget(column)
+                column.deleteLater()
+                self._selected_options.pop(key, None)
+        old_keys = set(self._columns_by_key)
+        self.entries = entries
+        for key, (item, options_map) in zip(keys, entries):
+            if key not in old_keys:
+                if item.enum_attr == "rotateOrder":
+                    try:
+                        item.gimbal_info = self.parent_dialog.analyze_group_gimbal(
+                            item.objects_map)
+                    except Exception as exc:
+                        cmds.warning("Error analyzing staged rotate orders: {}".format(exc))
+                        item.gimbal_info = {}
+                self._columns_by_key[key] = self._make_column(key, item, options_map)
+        self._column_widgets = [self._columns_by_key[key][0] for key in keys]
+        self._option_groups = [self._columns_by_key[key][1] for key in keys]
+        self._title.setText("Switch {} channels".format(len(entries)))
+        if getattr(self, "_apply_button", None) is not None:
+            self._apply_button.setEnabled(bool(self._selected_options))
+        self._layout_columns()
+
+    def _layout_columns(self):
+        available_width = max(util.DPI(165), self.width() - util.DPI(56))
+        column_step = util.DPI(171)
+        columns_per_row = max(1, min(len(self._column_widgets),
+                                      available_width // column_step))
+        order = tuple(id(column) for column in self._column_widgets)
+        if (columns_per_row == self._column_count and order == self._layout_order
+                and self._columns_grid.count() == len(self._column_widgets)):
+            return
+        self._column_count = columns_per_row
+        self._layout_order = order
         while self._columns_grid.count():
             self._columns_grid.takeAt(0)
-        available_width = util.DPI(700)
-        if screen is not None:
-            available_width = screen.availableGeometry().width() - util.DPI(80)
-        column_step = util.DPI(171)
-        columns_per_row = max(
-            1,
-            min(len(self._column_widgets), available_width // column_step),
-        )
         for index, column in enumerate(self._column_widgets):
             self._columns_grid.addWidget(
                 column,
@@ -2656,20 +2687,20 @@ class MultiAttributeSwitchDialog(FloatingWidget):
         if checked:
             self._all_frames = all_frames
 
-    def _choose_option(self, checked, entry_index, option):
+    def _choose_option(self, checked, entry_key, option):
         if not checked:
             return
-        self._selected_options[entry_index] = option
+        self._selected_options[entry_key] = option
         if self._apply_button is not None:
             self._apply_button.setEnabled(True)
 
     def _apply(self):
         if not self._selected_options:
             return
-        staged_entries = [
-            (self.entries[index][0], self.entries[index][1], option)
-            for index, option in sorted(self._selected_options.items())
-        ]
+        staged_entries = [(item, options_map, self._selected_options[key])
+                          for item, options_map in self.entries
+                          for key in [self._entry_key((item, options_map))]
+                          if key in self._selected_options]
         self.parent_dialog._apply_multi_switch(
             staged_entries, self._all_frames
         )
@@ -2686,7 +2717,10 @@ class MultiAttributeSwitchDialog(FloatingWidget):
             QtGui.QGuiApplication.screenAt(position)
             or QtGui.QGuiApplication.primaryScreen()
         )
-        self._layout_columns(screen)
+        desired_width = min(screen.availableGeometry().width() - util.DPI(40),
+                            util.DPI(40 + 171 * min(len(self.entries), 4))) if screen else util.DPI(400)
+        self.resize(max(self.minimumWidth(), desired_width), self.height())
+        self._layout_columns()
         self.adjustSize()
         if screen is not None:
             available = screen.availableGeometry()
@@ -2709,6 +2743,11 @@ class MultiAttributeSwitchDialog(FloatingWidget):
         self.move(position)
         self.show()
         self.raise_()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_columns_grid"):
+            self._layout_columns()
 
 class _TargetRow(QWidget):
     """One xform target, styled like the switch rows. Hover shows the remove X."""
@@ -3591,8 +3630,9 @@ class SwitchExecutor(object):
                          "all_frames": all_frames})
         return jobs, fast
 
-    def _trajectory_frames(self, job, timeline_selection, selected_range):
-        """Samples needed to keep interpolated motion when a space key is inserted.
+    def _trajectory_frames(self, job, timeline_selection, selected_range,
+                           include_subframes=True):
+        """Frames safeguarding motion when a space key is inserted.
 
         Inserting a compensated transform key changes the splines on both sides
         of that key, including frames whose switch attribute has not changed.
@@ -3627,18 +3667,30 @@ class SwitchExecutor(object):
             following = [t for t in key_times if t > high]
             first = max(previous) if previous else low
             last = min(following) if following else high
+            # Previous compensation may have inserted dozens of T/R keys.
+            # They must never truncate the interval of a subsequent reverse
+            # switch: the preceding/following SPACE keys delimit the region
+            # whose local animation must be re-compensated.
+            switch_times = Maya.key_times_for_plug(job["op"].plug)
+            earlier_switches = [t for t in switch_times if t < low]
+            later_switches = [t for t in switch_times if t > high]
+            if earlier_switches:
+                first = min(first, max(earlier_switches))
+            if later_switches:
+                last = max(last, min(later_switches))
         frames.update(t for t in key_times if first <= t <= last)
-        # Eighth-frame sampling bounds spline/tangent deviations on short
-        # spans; a fixed budget prevents long shots from stalling UI.
-        span = max(0.0, last - first)
-        interval = max(0.125, math.ceil(span / 60.0) * 0.125)
-        if interval > 0.125:
-            self.issues.append("Trajectory sampled every %g frames over %s-%s"
-                               % (interval, first, last))
-        current = math.ceil(first / interval) * interval
-        while current <= last:
-            frames.add(float(current))
-            current += interval
+        if include_subframes:
+            # These are verification points. The coordinator no longer bakes
+            # transform keys at every point; it inserts keys only at misses.
+            span = max(0.0, last - first)
+            interval = max(0.0625, math.ceil(span / 32.0) * 0.0625)
+            if interval > 0.0625:
+                self.issues.append("Trajectory verified every %g frames over %s-%s"
+                                   % (interval, first, last))
+            current = math.ceil(first / interval) * interval
+            while current <= last:
+                frames.add(round(float(current), 6))
+                current += interval
         # A space key introduces a discontinuity in local T/R even though the
         # desired world trajectory is continuous. A sample only at the key
         # lets spline tangents spread that jump across the preceding quarter
@@ -3700,6 +3752,7 @@ class SwitchExecutor(object):
             "marker": None,
             "depth": {},
             "channels": {},
+            "linear_channels": {},
             "warned": set(),
         }
         for target in targets:
@@ -3727,6 +3780,18 @@ class SwitchExecutor(object):
                 if Maya.key_times_for_plug(plug):
                     animated.add(channel)
             ctx["channels"][target] = (settable, animated)
+            linear = set()
+            for channel in animated:
+                plug = Maya.plug(target, channel)
+                try:
+                    incoming = cmds.keyTangent(plug, query=True, inTangentType=True) or []
+                    outgoing = cmds.keyTangent(plug, query=True, outTangentType=True) or []
+                    if incoming and outgoing and all(kind == "linear" for kind in
+                                                     incoming + outgoing):
+                        linear.add(channel)
+                except RuntimeError:
+                    pass
+            ctx["linear_channels"][target] = linear
             # Maya can key selected animation layers even when a blend node
             # makes getAttr(settable=True) false. Successful compensation is
             # checked against the evaluated matrix; key writes are checked
@@ -3834,6 +3899,9 @@ class SwitchExecutor(object):
                         raise PoseCompensationError(
                             "%s could not key compensated pose at frame %s"
                             % (plug, frame))
+                    if channel in ctx["linear_channels"][target]:
+                        cmds.keyTangent(plug, edit=True, time=(frame, frame),
+                                        inTangentType="linear", outTangentType="linear")
 
     @staticmethod
     def _end_write(ctx):
@@ -3872,18 +3940,35 @@ class SwitchExecutor(object):
             if not jobs and not fast:
                 return set()
             schedule = {}
+            verification = {}
             for job in jobs:
                 sample_frames = run.main(self._trajectory_frames, job, timeline_selection,
                                          selected_range)
+                anchor_frames = run.main(self._trajectory_frames, job, timeline_selection,
+                                         selected_range, False)
                 for op in job["ops"]:
                     target = op.xform_target
                     if not target:
                         continue  # no xform target: the switch is written, no pose is held
                     for frame in sample_frames:
-                        slot = schedule.setdefault(frame, {})
+                        destination = schedule if frame in anchor_frames else verification
+                        slot = destination.setdefault(frame, {})
                         slot[target] = slot.get(target, False) or job["keyed"]
             targets = sorted({t for slot in schedule.values() for t in slot})
             probes = self._probe_frames(schedule)
+            for frame, slot in verification.items():
+                # Another operation may have an authored anchor at this time.
+                # Verify the other targets even though they need no key here.
+                pending = {target: keyed for target, keyed in slot.items()
+                           if target not in schedule.get(frame, {})}
+                if pending:
+                    probes.setdefault(frame, {}).update(pending)
+            if len(probes) > self.MAX_TRAJECTORY_PROBES:
+                frames = sorted(probes)
+                stride = math.ceil(len(frames) / float(self.MAX_TRAJECTORY_PROBES))
+                probes = {frame: probes[frame] for frame in frames[::stride]}
+                self.issues.append("Trajectory verification limited to %s subframes"
+                                   % len(probes))
             self.last_range = (min(schedule), max(schedule)) if schedule else None
             run.set_total(len(schedule) * 2 + len(probes) * 3 + 1)
 
@@ -3913,10 +3998,11 @@ class SwitchExecutor(object):
                     run.check()
                     run.main(self._compensate_frame, frame, schedule[frame], snapshots[frame], ctx)
                     run.step()
-                # Inserting even correct sampled keys can reshape spline or
-                # weighted tangents between them. Refine only measured misses,
-                # and revalidate after subsequent keys can reshape neighbors.
-                for attempt in range(2):
+                # Original-key mode validates intermediates but never keys them.
+                # A rig that cannot be represented by those keys fails cleanly;
+                # high-fidelity correction is an explicit opt-in for that case.
+                refine = getattr(self.owner, "allow_subframe_compensation", True)
+                for attempt in range(2 if refine else 1):
                     misses = {}
                     for frame in sorted(probes):
                         run.check()
@@ -3926,6 +4012,11 @@ class SwitchExecutor(object):
                         run.step()
                     if not misses:
                         break
+                    if not refine:
+                        raise PoseCompensationError(
+                            "Original animation keys cannot preserve the world trajectory "
+                            "at %s; enable high-fidelity subframe compensation to allow "
+                            "additional keys" % next(iter(sorted(misses))))
                     for frame in sorted(misses):
                         run.check()
                         run.main(self._compensate_frame, frame, misses[frame],
@@ -4090,10 +4181,12 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
 
         selected_entries = self._selected_multi_entries()
         entries = self._expanded_multi_entries(selected_entries)
-        self._close_multi_switch_dialog(clear_selection=False)
         if len(entries) < 2:
+            self._close_multi_switch_dialog(clear_selection=False)
             return
-
+        if self._multi_switch_dialog and util.is_valid_widget(self._multi_switch_dialog):
+            self._multi_switch_dialog.update_entries(entries)
+            return
         self._multi_switch_dialog = MultiAttributeSwitchDialog(self, entries)
         anchor = (
             item
@@ -4354,6 +4447,8 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         self.all_frames = self._setting_bool("all_frames", False)
         self.euler_filter = self._setting_bool("euler_filter", True)
         self.fast_rotation_order = self._setting_bool("fast_rotation_order", True)
+        self.allow_subframe_compensation = self._setting_bool(
+            "allow_subframe_compensation", False)
         self.show_rotate_order = self._setting_bool("show_rotate_order", True)
         self.asset_view = self._setting_bool("asset_view", False)
         self._asset_namespace = None
@@ -5250,6 +5345,16 @@ class SpaceSwitchAlehaWidget(FloatingWidget):
         )
         euler_action.setCheckable(True)
         euler_action.setChecked(self.euler_filter)
+
+        compensation_action = self.context_menu.addAction(
+            "High-fidelity subframe compensation",
+            description="Optional: insert additional keys when original authored keys "
+                        "cannot preserve world motion. Disabled by default to keep curves sparse.",
+        )
+        compensation_action.setCheckable(True)
+        compensation_action.setChecked(self.allow_subframe_compensation)
+        compensation_action.toggled.connect(
+            lambda state: self.set_setting("allow_subframe_compensation", state))
 
         self.context_menu.addSeparator()
 

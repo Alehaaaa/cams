@@ -45,7 +45,9 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
 | Layered rotation curves | No `animLayer` symbol appears in the searched names/constants of the main switch handler or `core313.pyc`; indirect wrappers and obfuscated names remain possible | Maya 2024's selected layer receives compensation keys while base keys stay unchanged. Camstool's Euler filtering now traverses `animBlendNode*` upstream to reach both base and layered rotation curves; tested through the real Maya DG and widget. This is Maya-derived behavior, not attributed to animBot. |
 | Impossible pose and interrupted operation | The reference uses temporary transforms and multiple write/cleanup stages; full exception edges remain obfuscated | Camstool verifies the evaluated matrix after writing, raises `PoseCompensationError` if exact matching is impossible, and rolls the undo chunk back; tests cover fully locked translation, selected-range undo/redo, and cancellation after partial writes |
 | UI lifecycle | UI bytecode contains Qt layouts, click callbacks, tooltips, hide/deleteLater | Popup, multi-switch dialog, target setup, callback removal and refresh batching in `SpaceSwitchAlehaWidget` |
-| Adaptive spline correction (Camstool extension) | No equivalent adaptive curve-refinement algorithm has been recovered from `attributeSpaceSwitcher313.pyc` or `core313.pyc`; their observed temporary-transform/constraint and explicit-key paths are described above | After eighth-frame baking, Camstool captures midpoints before mutation, evaluates resulting world matrices and keys only points exceeding 0.001-unit matrix-element deviation. It retries at most twice, caps probes at 520, and raises a rollback-triggering error if sampled deviation persists. Maya regression verifies flat/linear tangents and undo. |
+| Adaptive spline correction (Camstool extension) | No equivalent adaptive curve-refinement algorithm has been recovered from `attributeSpaceSwitcher313.pyc` or `core313.pyc`; their observed temporary-transform/constraint and explicit-key paths are described above | In optional high-fidelity mode, Camstool captures subframe verification poses before mutation, evaluates resulting world matrices and keys only points exceeding 0.001-unit matrix-element deviation. It retries at most twice, caps probes at 520, and raises a rollback-triggering error if sampled deviation persists. Maya regression verifies flat/linear tangents and undo. |
+| Sparse original-key execution (Camstool extension) | The compiled line-1802 handler explicitly writes channel keys via `setKeyframe`; the searched code does not establish any automatic eighth/subframe sampling policy | Default `allow_subframe_compensation=False`: preserve authored animation key times and local switch discontinuity guards, verify intermediate matrices without inserting correction keys, and rollback if the original key/tangent topology cannot reproduce the trajectory. Explicit high-fidelity opt-in can add selective subframe correction keys; the previous adaptive integration remains available. A linear-tangent test retains at most 12 T/R keys across a 9-frame shot (formerly 73+ from fixed eighth-frame baking). A flat-tangent negative test verifies rejection and undo without residual keys. |
+| Reverse operation boundary (Camstool extension) | Explicit multi-frame switching and constraint cleanup appear in line-1802 compiled handler; obfuscated scope selection prevents attributing exact guard semantics to animBot | Subsequent inverse switches now extend compensation to adjacent **space attribute** keys, rather than terminating at nearby transform keys created by the preceding switch. A frame-4 → frame-7 inverse-switch Maya test found a 3-unit world deviation at frame 7.125 before this fix and verifies the correction plus two-step undo. |
 
 ## Verified and unresolved boundaries
 
@@ -93,7 +95,7 @@ below were obtained using CPython 3.13 `marshal` and `dis`, *not* REA Evidence I
 
 ## Verification scope (Maya 2024)
 
-The expanded `tests/test_spaceswitch_maya.py` suite exercises 37 independent
+The expanded `tests/test_spaceswitch_maya.py` suite exercises 42 independent
 scenarios, including real intermediate trajectory samples, a selected range
 with unchanged world samples outside its boundary, active animation-layer
 translation with original base keys retained, mixed flat/linear tangents and
@@ -103,6 +105,17 @@ includes cleanup on cancellation at offsets 1966–2174, but its exact
 exception-safety guarantees remain obscured by called wrappers; Camstool's
 transaction is verified independently through undo of rejected keys and
 constraint-impossible poses.
+
+The October sparse-key revision changes the default user policy: fixed-grid
+subframes are observation points, **never unconditional transform keys**.
+Original-key mode refuses a switch whose measured world motion requires
+additional keys, preserving the Maya scene through the existing UI undo
+transaction. The context menu offers a persistent high-fidelity opt-in for
+rigs requiring selective off-key corrections. This is an explicit accuracy/key
+count trade-off: exact continuous trajectories for animated parents cannot in
+general be represented using an arbitrary finite set of original transform
+keys. Constant-offset linear-tangent rigs are a verified sparse success case;
+nonlinear flat tangents that fail validation are a verified atomic refusal case.
 
 ## Relevant locations
 
